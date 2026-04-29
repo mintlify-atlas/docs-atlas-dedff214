@@ -1,0 +1,115 @@
+---
+title: "Install, configure, and run the MHR-CFW local proxy"
+description: "Clone MHR-CFW, install Python 3.10+ dependencies, run the interactive setup wizard to generate config.json, and start the local HTTP and SOCKS5 proxy."
+---
+
+The local proxy is the component that runs on your machine. It intercepts browser traffic, wraps it in the relay protocol, and forwards it through the Google Apps Script relay chain to your Cloudflare Worker exit node. All outbound connections from the proxy appear to your network as HTTPS traffic to `www.google.com`.
+
+## Prerequisites
+
+- Python 3.10 or later
+- pip
+
+## Clone and install
+
+<CodeGroup>
+
+```bash Standard
+git clone https://github.com/denuitt1/mhr-cfw.git
+cd mhr-cfw
+pip install -r requirements.txt
+```
+
+```bash Mirror (if PyPI blocked)
+git clone https://github.com/denuitt1/mhr-cfw.git
+cd mhr-cfw
+pip install -r requirements.txt -i https://mirror-pypi.runflare.com/simple/ --trusted-host mirror-pypi.runflare.com
+```
+
+</CodeGroup>
+
+The `requirements.txt` installs the following packages:
+
+```text requirements.txt
+# Core (no external dependencies for basic modes)
+# Python 3.10+ required
+
+# Optional: MITM interception (apps_script mode)
+cryptography>=41.0.0
+
+# Optional: HTTP/2 multiplexing (faster apps_script relay)
+h2>=4.1.0
+
+# CA bundle for TLS verification — skipped on Windows (uses system cert store).
+certifi>=2024.1.0; sys_platform != "win32"
+
+# Optional: Brotli decompression (modern websites send `br` encoding)
+brotli>=1.1.0
+
+# Optional: Zstandard decompression (some CDNs now serve `zstd`)
+zstandard>=0.22.0
+
+# LAN interface detection now uses only the Python standard library
+# (works on Windows, Linux, macOS, Android/Termux without a C compiler).
+```
+
+## Run the setup wizard
+
+Run the interactive wizard to generate `config.json`:
+
+```bash
+python setup.py
+```
+
+The wizard prompts you for:
+
+- **auth_key** — the shared secret that must match `AUTH_KEY` in `Code.gs`. The wizard suggests a random 32-character key if you press Enter.
+- **Deployment ID(s)** — the Apps Script Deployment ID(s) you copied in the previous step. Enter multiple IDs separated by commas to enable load balancing.
+- **Network settings** — HTTP proxy port (default `8085`), SOCKS5 port (default `1080`), and whether to enable LAN sharing.
+
+<Note>
+  If `config.json` does not exist when you run `python main.py`, the proxy automatically launches the setup wizard before starting. You do not need to run `setup.py` separately on first use.
+</Note>
+
+If `config.json` already exists, the wizard asks for confirmation before overwriting it and backs up the existing file to `config.json.bak`.
+
+## Start the proxy
+
+<CodeGroup>
+
+```bat Windows
+run.bat
+```
+
+```bash Linux / macOS
+./run.sh
+```
+
+```bash Directly
+python main.py
+```
+
+</CodeGroup>
+
+The launch scripts (`run.bat` / `run.sh`) create a local virtualenv, install dependencies, and run the setup wizard automatically if no `config.json` is found before starting `main.py`.
+
+Once running, the proxy listens on:
+
+| Protocol | Address            |
+| -------- | ------------------ |
+| HTTP     | `127.0.0.1:8085`   |
+| SOCKS5   | `127.0.0.1:1080`   |
+
+<Warning>
+  On first startup, the proxy auto-installs a MITM CA certificate so it can intercept and re-encrypt HTTPS traffic. If automatic installation fails, run the following command (you may need administrator or sudo privileges):
+
+  ```bash
+  python main.py --install-cert
+  ```
+
+  After installation, restart your browser so it picks up the new trusted root.
+</Warning>
+
+<Tip>
+  To route browser traffic through the proxy, see [Browser setup](/usage/browser-setup) for instructions on configuring FoxyProxy or your system proxy settings.
+</Tip>

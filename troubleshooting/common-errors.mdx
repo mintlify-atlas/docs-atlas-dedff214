@@ -1,0 +1,72 @@
+---
+title: "Fix MHR-CFW startup, relay, and cert error messages"
+description: "Fix MHR-CFW startup failures, unauthorized relay responses, Apps Script quota errors, certificate trust issues, and slow large-file downloads."
+---
+
+This page covers the most common errors encountered when setting up and running MHR-CFW, with their causes and fixes. For certificate-specific errors, see [Certificate Issues](/troubleshooting/certificate-issues).
+
+<Note>
+  Set `"log_level": "DEBUG"` in `config.json` when diagnosing issues. Debug mode logs every request, relay call, and routing decision, making it much easier to trace the source of a problem.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Refusing to start: 'auth_key' is unset or uses a known placeholder">
+    **Cause:** `auth_key` in `config.json` is empty or still set to a placeholder value such as `"CHANGE_ME_TO_A_STRONG_SECRET"` or `"your-secret-password-here"`.
+
+    **Fix:** Set `auth_key` to a strong random secret. Run `python setup.py` to generate one interactively. Make sure the value in `config.json` exactly matches the `AUTH_KEY` constant inside `Code.gs` — both sides must be identical for the relay to accept requests.
+  </Accordion>
+  <Accordion title="Missing 'script_id' in config">
+    **Cause:** `script_id` is not set in `config.json`, or it still contains the placeholder value `"YOUR_APPS_SCRIPT_DEPLOYMENT_ID"`.
+
+    **Fix:** Deploy the Apps Script from `Code.gs` (see [Google Apps Script setup](/setup/google-apps-script)), copy the Deployment ID, and paste it into `config.json` as `"script_id"`.
+  </Accordion>
+  <Accordion title='Relay returns {"e": "unauthorized"}'>
+    **Cause:** The `auth_key` in `config.json` does not match the `AUTH_KEY` constant in the deployed `Code.gs`.
+
+    **Fix:** Ensure both values are byte-for-byte identical. Common pitfalls include extra whitespace, different capitalisation, or a stale Apps Script deployment that still uses the old key. After updating `Code.gs`, create a new deployment and update `script_id` in `config.json` to point at it.
+  </Accordion>
+  <Accordion title="HTTPS sites show a certificate error in the browser">
+    **Cause:** The MITM CA certificate (`ca/ca.crt`) is not trusted by your browser or OS.
+
+    **Fix:** Run `python main.py --install-cert`, then restart your browser completely (all windows, not just the current tab). For detailed instructions, see [Certificate Issues](/troubleshooting/certificate-issues).
+  </Accordion>
+  <Accordion title="RATE LIMIT detected! quota_exceeded">
+    **Cause:** The Google Apps Script quota of 20,000 `UrlFetchApp` calls per day (free accounts) has been exceeded. All relay calls fail until the daily quota resets at midnight Pacific time.
+
+    **Fix:** Add multiple Deployment IDs to `config.json` as a `script_ids` array. The proxy distributes requests across them using sticky per-host assignment, which multiplies your effective daily quota:
+
+    ```json
+    {
+      "script_ids": [
+        "AKfycb...deployment1",
+        "AKfycb...deployment2",
+        "AKfycb...deployment3"
+      ]
+    }
+    ```
+
+    If you only have one deployment, wait for the quota to reset before continuing.
+  </Accordion>
+  <Accordion title="Proxy starts but websites don't load / connection refused">
+    **Cause:** Your browser is not configured to use the MHR-CFW proxy.
+
+    **Fix:** Configure your browser to use an HTTP proxy at `127.0.0.1:8085`. Step-by-step instructions for Chrome, Firefox, and system-wide proxy settings are in [Browser Setup](/usage/browser-setup).
+  </Accordion>
+  <Accordion title="Direct tunnel fallback → switching to relay (in logs)">
+    This is informational, not an error. The proxy attempted a direct TLS connection to the target host but the connection failed — most likely because your ISP or network is blocking it with DPI. The proxy automatically switched to relay mode through the Apps Script. No action is required.
+  </Accordion>
+  <Accordion title="Non-TLS traffic on X.X.X.X:443 (likely Telegram MTProto) (in logs)">
+    This is informational. Telegram uses an obfuscated binary protocol on port 443 that is not TLS-based. The proxy cannot relay it over the standard HTTPS tunnel. Telegram rotates to alternative endpoints automatically, so connectivity typically restores within seconds without any manual action.
+  </Accordion>
+  <Accordion title="Large files download very slowly">
+    **Cause:** Large files that are not in the `chunked_download_extensions` list are downloaded in a single relay call, which is limited by the Apps Script response size cap and can stall.
+
+    **Fix:** Add the relevant file extension to `chunked_download_extensions` in `config.json`. To enable chunked mode for all file types, set it to `["*"]`:
+
+    ```json
+    {
+      "chunked_download_extensions": ["*"]
+    }
+    ```
+  </Accordion>
+</AccordionGroup>

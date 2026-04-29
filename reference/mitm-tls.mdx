@@ -1,0 +1,95 @@
+---
+title: "How MHR-CFW performs MITM TLS interception locally"
+description: "MITMCertManager creates a local CA and per-host certs to decrypt HTTPS. Covers CA lifecycle, cert caching, CORS preflight handling, and bypass rules."
+---
+
+To relay HTTPS traffic through Apps Script, MHR-CFW must read the plaintext of each request before it can encode it as JSON. It does this using a MITM (man-in-the-middle) technique: a locally-generated CA certificate signs per-host leaf certificates on demand, letting the proxy terminate the browser's TLS session and inspect the decrypted HTTP traffic before forwarding it upstream.
+
+<Warning>
+`ca/ca.key` is the private key for your local CA. Anyone who obtains this file can generate certificates that your browser trusts unconditionally. Keep it private and do not commit it to version control.
+</Warning>
+
+## CA certificate
+
+`MITMCertManager` (implemented in `src/mitm.py`) manages the CA lifecycle.
+
+On the first run, if `ca/ca.crt` and `ca/ca.key` do not exist, `MITMCertManager._create_ca()` generates:
+
+- A 2048-bit RSA key pair stored at `ca/ca.key` (permissions `0600` on POSIX)
+- A self-signed X.509 CA certificate stored at `ca/ca.crt`, valid for 10 years, with `BasicConstraints: CA=true`
+
+On subsequent runs, the existing files are loaded directly. The CA directory is always at the project root — one level above `src/`.
+
+The CA certificate must be installed in your browser's (or OS's) trusted root store before MITM interception works. MHR-CFW attempts to do this automatically at startup using `cert_installer.install_ca()`. You can also install or remove it manually:
+
+```bash
+python main.py --install-cert
+python main.py --uninstall-cert
+```
+
+## Per-host certificate generation
+
+When the browser connects through the proxy to an HTTPS host, `MITMCertManager.get_server_context(domain)` returns an `ssl.SSLContext` configured for that hostname. The first time a domain is seen, `_generate_domain_cert()` runs:
+
+1. Generates a fresh 2048-bit RSA key for the leaf certificate
+2. Builds an X.509 certificate with `CN=<domain>` and a Subject Alternative Name matching the requested hostname (a `DNSName` entry for hostnames, or `IPAddress` for IP literals)
+3. Signs the certificate with the CA key using SHA-256
+4. Writes the certificate chain (leaf + CA) and key to a temporary directory
+5. Loads them into an `ssl.SSLContext` and caches it in `_ctx_cache`
+
+Subsequent requests to the same hostname reuse the cached context without any regeneration. The certificate is valid for 365 days from the moment it is first generated.
+
+## TLS interception flow
+
+<Steps>
+  <Step title="Browser sends CONNECT">
+    The browser sends `CONNECT example.com:443 HTTP/1.1` to the local proxy. The proxy replies `200 Connection Established` immediately — this tells the browser the tunnel is open and it can start the TLS handshake.
+  </Step>
+  <Step title="Proxy performs TLS handshake as server">
+    The proxy calls `loop.start_tls()` on the existing connection using the per-host `ssl.SSLContext` for `example.com`. The browser validates the certificate against the trusted local CA and the handshake completes. The connection is now a decrypted TLS stream inside the proxy.
+  </Step>
+  <Step title="Browser sends the plaintext HTTP request">
+    With TLS terminated locally, the browser sends ordinary HTTP — method, path, headers, and body — as if it were talking directly to `example.com`. The proxy reads this plaintext traffic via `_relay_http_stream()`.
+  </Step>
+  <Step title="Proxy encodes the request as JSON">
+    The proxy serialises the method, full URL, headers, and base64-encoded body into a JSON payload and hands it to `DomainFronter.relay()`.
+  </Step>
+  <Step title="DomainFronter sends the request over domain-fronted TLS">
+    `DomainFronter` acquires a TLS connection from the pool (SNI: `www.google.com`, TCP destination: `google_ip`) and sends the JSON payload to `script.google.com/macros/s/<script_id>/exec` as an HTTP POST.
+  </Step>
+  <Step title="Response is decoded and returned to the browser">
+    The Apps Script relay returns the response as JSON (status, headers, base64 body). The proxy decodes the body (handling gzip, brotli, or zstd if present), reconstructs a valid HTTP response, and writes it back over the locally-terminated TLS session. The browser receives the response as though it came directly from `example.com`.
+  </Step>
+</Steps>
+
+## CORS handling
+
+`UrlFetchApp` in Google Apps Script does not support the `OPTIONS` HTTP method. If the proxy forwarded `OPTIONS` preflight requests to Apps Script, every cross-origin `fetch()` or XHR from the browser would fail.
+
+To prevent this, the proxy intercepts `OPTIONS` requests that carry an `Access-Control-Request-Method` header and responds to them locally without touching the relay:
+
+```
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: <origin>
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: <requested headers>
+Access-Control-Max-Age: 86400
+```
+
+For all other relayed responses where the browser sent an `Origin` header, the proxy injects permissive `Access-Control-Allow-*` response headers before delivering the response. Without this injection, the browser's same-origin policy would block the response even though the relay fetched it successfully.
+
+## What is not intercepted
+
+The MITM path is only active when the proxy decides a connection should be relayed through Apps Script. Several categories of traffic bypass MITM entirely:
+
+| Traffic type | Behaviour |
+|---|---|
+| Hosts in `bypass_hosts` | Direct TCP tunnel — no MITM, no relay |
+| `www.google.com`, `google.com`, `safebrowsing.google.com` | Direct TCP tunnel — no MITM |
+| SNI-rewrite domains (YouTube, etc.) | MITM-decrypt from browser, re-encrypt toward `google_ip` with `SNI=front_domain` — no Apps Script relay |
+| Non-HTTP ports (e.g. 5228, 25, 993) | Direct TCP tunnel — payloads are not HTTP and cannot be relayed |
+| IP literals on non-80/443 ports | Direct TCP tunnel after failed direct-connect attempt |
+
+<Note>
+MHR-CFW requires the `cryptography` Python package for all MITM functionality. If it is not installed, `ProxyServer.__init__()` will log an error and call `sys.exit(1)`. Install it with `pip install cryptography`.
+</Note>

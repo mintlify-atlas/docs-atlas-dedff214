@@ -1,0 +1,81 @@
+---
+title: "MHR-CFW main.py CLI: all flags, ports, and options"
+description: "Every CLI flag for main.py: --config, --port, --host, --socks5-port, --disable-socks5, --log-level, --install-cert, --uninstall-cert, --no-cert-check, --scan."
+---
+
+`main.py` is the MHR-CFW entry point, run as `python main.py [flags]`. All flags are optional — defaults come from `config.json`. Flags that correspond to environment variables are checked in the same way: the CLI flag takes precedence over its environment variable equivalent.
+
+## Flags
+
+<ParamField body="-c / --config" type="string" default="config.json">
+  Path to the config JSON file. Defaults to `config.json` in the current directory. Environment variable: `DFT_CONFIG`.
+</ParamField>
+
+<ParamField body="-p / --port" type="integer">
+  Override the HTTP proxy listen port from `config.json`. Environment variable: `DFT_PORT`. Takes precedence over `DFT_PORT` when both are set.
+</ParamField>
+
+<ParamField body="--host" type="string">
+  Override the listen host from `config.json`. Environment variable: `DFT_HOST`. Takes precedence over `DFT_HOST` when both are set.
+</ParamField>
+
+<ParamField body="--socks5-port" type="integer">
+  Override the SOCKS5 listen port from `config.json`. Environment variable: `DFT_SOCKS5_PORT`. Takes precedence over `DFT_SOCKS5_PORT` when both are set.
+</ParamField>
+
+<ParamField body="--disable-socks5" type="boolean">
+  Disable the SOCKS5 listener entirely. Equivalent to setting `"socks5_enabled": false` in `config.json`.
+</ParamField>
+
+<ParamField body="--log-level" type="string">
+  Override the log verbosity. Accepted values: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Environment variable: `DFT_LOG_LEVEL`. Takes precedence over `DFT_LOG_LEVEL` when both are set.
+</ParamField>
+
+<ParamField body="-v / --version" type="boolean">
+  Print the version string and exit. No other flags are processed when this is set.
+</ParamField>
+
+<ParamField body="--install-cert" type="boolean">
+  Install the MITM CA certificate as a trusted root and exit. May require administrator or `sudo` privileges depending on the operating system. Generates the certificate if it does not yet exist.
+</ParamField>
+
+<ParamField body="--uninstall-cert" type="boolean">
+  Remove the MITM CA certificate from the system's trusted roots and exit. May require administrator or `sudo` privileges.
+</ParamField>
+
+<ParamField body="--no-cert-check" type="boolean">
+  Skip the CA certificate trust check on startup. The proxy still runs, but browsers will show HTTPS certificate warnings for any intercepted connections until the certificate is trusted.
+</ParamField>
+
+<ParamField body="--scan" type="boolean">
+  Scan the candidate Google IPs for the fastest reachable one and exit. Uses `front_domain` from `config.json` as the SNI value during probing. Run this if you experience slow relay connections and want to update `google_ip` in your config.
+</ParamField>
+
+## Examples
+
+```bash
+# Start with default config.json
+python main.py
+
+# Use a custom config file
+python main.py --config /path/to/myconfig.json
+
+# Override ports at runtime
+python main.py --port 8080 --socks5-port 1081
+
+# Install CA certificate (may need admin/sudo)
+python main.py --install-cert
+
+# Debug mode
+python main.py --log-level DEBUG
+
+# Find fastest Google IP
+python main.py --scan
+
+# Check version
+python main.py --version
+```
+
+## Convenience scripts
+
+`run.bat` (Windows) and `run.sh` (Linux/macOS) are thin wrappers that call `python main.py` with no extra flags. They exist solely to reduce typing and can be double-clicked or invoked from a terminal without activating a virtual environment manually.

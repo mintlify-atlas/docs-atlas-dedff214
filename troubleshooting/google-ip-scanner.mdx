@@ -1,0 +1,68 @@
+---
+title: "Use the MHR-CFW Google IP scanner for faster relay"
+description: "Run python main.py --scan to probe all 26 candidate Google IPs and find the lowest-latency one for domain fronting, then set google_ip in config.json."
+---
+
+MHR-CFW uses a Google frontend IP (`google_ip` in `config.json`) as the TLS connection endpoint for domain fronting. The scanner probes a list of candidate Google IPs and identifies the one with the lowest latency from your location — useful when the default IP is slow or unreachable.
+
+## Run the scanner
+
+```bash
+python main.py --scan
+```
+
+The scanner reads your current `front_domain` from `config.json` (defaulting to `www.google.com`) and uses it as the SNI hostname for every probe.
+
+## How it works
+
+The scanner tests each IP in `CANDIDATE_IPS` from `src/constants.py` — 26 addresses across Google's `216.239.x.x`, `142.250.x.x`, `172.217.x.x`, and `34.107.x.x` ranges:
+
+```
+216.239.32.120    216.239.34.120    216.239.36.120    216.239.38.120
+142.250.80.142    142.250.80.138    142.250.179.110   142.250.185.110
+142.250.184.206   142.250.190.238   142.250.191.78    172.217.1.206
+172.217.14.206    172.217.16.142    172.217.22.174    172.217.164.110
+172.217.168.206   172.217.169.206   34.107.221.82     142.251.32.110
+142.251.33.110    142.251.46.206    142.251.46.238    142.250.80.170
+142.250.72.206    142.250.64.206
+```
+
+Each probe opens a TLS connection to the IP on port 443, presents the configured `front_domain` as the SNI hostname, and sends a `HEAD /` request. Probes run with a 4-second timeout and up to 8 connections in parallel.
+
+Results are sorted by latency and printed in a table:
+
+```
+IP                   LATENCY      STATUS
+-------------------- ------------ -------------------------
+216.239.38.120            42ms    OK
+142.250.80.142            58ms    OK
+172.217.1.206             71ms    OK
+...
+216.239.32.120           —        timeout
+```
+
+After the scan, the output shows the top three fastest IPs and the recommended `config.json` update.
+
+## Update your config
+
+Set `google_ip` in `config.json` to the fastest IP reported by the scanner:
+
+```json
+{
+  "google_ip": "216.239.38.120"
+}
+```
+
+Restart the proxy after saving the change.
+
+<Note>
+  The default IP `216.239.38.120` works for most users. Run the scanner only if you notice consistently high latency, frequent relay timeouts, or if the proxy logs show connection failures to the current `google_ip`.
+</Note>
+
+<Tip>
+  You can also override `front_domain` in `config.json` to use a different Google-fronted domain. The scanner always tests TLS connectivity to `script.google.com` through whichever `front_domain` is configured, so scanning with a custom domain gives you results relevant to your specific setup.
+</Tip>
+
+<Info>
+  When `front_domain` is a Google domain (any hostname ending in `.google.com`), the proxy automatically rotates through `www.google.com`, `mail.google.com`, and `accounts.google.com` as the SNI value in successive outbound TLS handshakes. This rotation prevents DPI systems from flagging a static "always www.google.com" pattern from the client, while all three hostnames resolve to the same Google edge IPs.
+</Info>

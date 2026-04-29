@@ -1,0 +1,141 @@
+---
+title: "Set up the Cloudflare Worker exit node for MHR-CFW"
+description: "Create and deploy worker.js as a Cloudflare Worker exit node that fetches target URLs for the Google Apps Script relay. The free Workers plan is sufficient."
+---
+
+The Cloudflare Worker is the exit node of the relay chain. It receives forwarded requests from the Google Apps Script relay and fetches the real target URL on the open internet, then returns the response. Without this worker, the relay has nowhere to send traffic once it leaves Google's infrastructure.
+
+<Note>
+  The free Cloudflare Workers plan is sufficient for personal use. It allows up to 100,000 requests per day at no cost.
+</Note>
+
+<Steps>
+  <Step title="Open the Cloudflare Dashboard">
+    Sign in at [dash.cloudflare.com](https://dash.cloudflare.com). From the sidebar, navigate to **Compute > Workers & Pages**.
+  </Step>
+
+  <Step title="Create a new Worker">
+    Click **Create Application**, select **Start with Hello World**, then click **Deploy**. Cloudflare will provision a new worker and assign it a URL in the format `your-worker-name.workers.dev`.
+  </Step>
+
+  <Step title="Open the code editor">
+    Click **Edit code**. Select all the default code in the editor and delete it.
+  </Step>
+
+  <Step title="Paste the worker code">
+    Copy the full contents of `script/worker.js` from the repository and paste it into the editor:
+
+    ```javascript script/worker.js
+    const WORKER_URL = "myworker.workers.dev";
+
+    export default {
+      async fetch(request) {
+        try {
+          if (request.headers.get("x-relay-hop") === "1") {
+            return json({ e: "loop detected" }, 508);
+          }
+
+          const req = await request.json();
+
+          if (!req.u) {
+            return json({ e: "missing url" }, 400);
+          }
+
+          const targetUrl = new URL(req.u);
+
+          const BLOCKED_HOSTS = [
+            WORKER_URL,
+          ];
+
+          if (BLOCKED_HOSTS.some(h => targetUrl.hostname.endsWith(h))) {
+            return json({ e: "self-fetch blocked" }, 400);
+          }
+
+          const headers = new Headers();
+          if (req.h && typeof req.h === "object") {
+            for (const [k, v] of Object.entries(req.h)) {
+              headers.set(k, v);
+            }
+          }
+
+          headers.set("x-relay-hop", "1");
+
+          const fetchOptions = {
+            method: (req.m || "GET").toUpperCase(),
+            headers,
+            redirect: req.r === false ? "manual" : "follow"
+          };
+
+          if (req.b) {
+            const binary = Uint8Array.from(atob(req.b), c => c.charCodeAt(0));
+            fetchOptions.body = binary;
+          }
+
+          const resp = await fetch(targetUrl.toString(), fetchOptions);
+
+          // Read response safely (no stack overflow)
+          const buffer = await resp.arrayBuffer();
+          const uint8 = new Uint8Array(buffer);
+
+          let binary = "";
+          const chunkSize = 0x8000; // prevent call stack overflow
+
+          for (let i = 0; i < uint8.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(
+              null,
+              uint8.subarray(i, i + chunkSize)
+            );
+          }
+
+          const base64 = btoa(binary);
+
+          const responseHeaders = {};
+          resp.headers.forEach((v, k) => {
+            responseHeaders[k] = v;
+          });
+
+          return json({
+            s: resp.status,
+            h: responseHeaders,
+            b: base64
+          });
+
+        } catch (err) {
+          return json({ e: String(err) }, 500);
+        }
+      }
+    };
+
+    function json(obj, status = 200) {
+      return new Response(JSON.stringify(obj), {
+        status,
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+    }
+    ```
+  </Step>
+
+  <Step title="Set your worker URL">
+    Update the `WORKER_URL` constant at the top of the file to match the URL Cloudflare assigned your worker. For example:
+
+    ```javascript
+    const WORKER_URL = "myworker.workers.dev";
+    ```
+
+    Replace `myworker.workers.dev` with your actual worker subdomain.
+  </Step>
+
+  <Step title="Deploy">
+    Click **Deploy**. The worker is now live and ready to receive requests from the Apps Script relay.
+  </Step>
+</Steps>
+
+<Warning>
+  `WORKER_URL` must exactly match your deployed worker's hostname (without `https://`). If it does not match, the self-fetch loop detection will misfire and block legitimate requests with a `self-fetch blocked` error.
+</Warning>
+
+<Tip>
+  Next, set up the Google Apps Script relay that forwards traffic through Google's infrastructure to this worker. See [Deploy the Google Apps Script relay](/setup/google-apps-script).
+</Tip>

@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "MHR-CFW",
+  "projectType": "infrastructure",
+  "projectName": "MHR-CFW",
+  "projectDescription": "A domain-fronting relay that routes traffic through Google Apps Script and Cloudflare Workers to bypass Deep Packet Inspection censorship.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#94cb04",
-    "light": "#545454"
-  },
-  "favicon": "https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/denuitt1/mhr-cfw"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/denuitt1/mhr-cfw"
-    }
-  },
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -93,5 +81,27 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Domain fronting via Google Apps Script — makes traffic appear as Google traffic to DPI",
+    "Cloudflare Worker exit node for fetching real destination URLs",
+    "Local HTTP and SOCKS5 proxy with MITM TLS interception",
+    "SNI rewriting to bypass blocked hostnames (YouTube, etc.)",
+    "Parallel batch relay for high throughput",
+    "Chunked download support for large files",
+    "LAN sharing mode to share the proxy with other devices",
+    "Interactive setup wizard for first-time configuration",
+    "Google IP scanner to find fastest reachable frontend IP",
+    "Response cache for static assets"
+  ],
+  "publicApiSurface": [
+    "main.py -- entry point, CLI arguments: -c/--config, -p/--port, --host, --socks5-port, --disable-socks5, --log-level, --install-cert, --uninstall-cert, --no-cert-check, --scan",
+    "setup.py -- interactive configuration wizard",
+    "config.json -- runtime configuration file (see config.example.json)",
+    "script/Code.gs -- Google Apps Script relay (doPost, doGet)",
+    "script/worker.js -- Cloudflare Worker exit node (fetch handler)",
+    "ProxyServer -- async HTTP+SOCKS5 proxy server class",
+    "DomainFronter -- domain fronting relay engine",
+    "MITMCertManager -- TLS certificate manager for MITM interception"
+  ]
 }

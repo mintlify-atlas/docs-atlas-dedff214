@@ -1,0 +1,142 @@
+---
+title: "Advanced MHR-CFW config: chunked downloads and SNI"
+description: "Tune chunked downloads, SNI rotation pool, and direct Google tunnel behavior in MHR-CFW. Includes a config profile optimized for large file downloads."
+---
+
+MHR-CFW has advanced options for power users who need to tune performance, handle large files, or customize how Google domains are handled. These fields are all optional — the defaults work well for most users. Add or modify only the fields you need in `config.json`.
+
+## Chunked download settings
+
+For large files, MHR-CFW splits the download into parallel byte-range chunks and reassembles them locally. This increases throughput when the relay has a lower per-request bandwidth cap than your connection can sustain.
+
+<ParamField body="chunked_download_min_size" type="integer" default="5242880">
+  Minimum file size in bytes (default 5 MB) before chunked mode is triggered.
+  Files smaller than this threshold are downloaded in a single request.
+</ParamField>
+
+<ParamField body="chunked_download_chunk_size" type="integer" default="524288">
+  Size of each individual chunk in bytes (default 512 KB). Smaller chunks
+  increase relay call overhead; larger chunks reduce parallelism gains. The
+  minimum accepted value is 65536 (64 KB).
+</ParamField>
+
+<ParamField body="chunked_download_max_parallel" type="integer" default="8">
+  Maximum number of chunk requests issued concurrently. Increase this if your
+  Apps Script quota allows more simultaneous calls; decrease it if you hit rate
+  limits.
+</ParamField>
+
+<ParamField body="chunked_download_max_chunks" type="integer" default="256">
+  Hard cap on the total number of chunks per file. A file of 256 chunks at 512
+  KB per chunk can be up to 128 MB. Increase proportionally if you need to
+  download larger files in chunked mode.
+</ParamField>
+
+<ParamField body="chunked_download_extensions" type="string[]">
+  File extensions that trigger chunked download mode. The default list covers
+  archives, executables, disk images, multimedia files, documents, and WebAssembly:
+
+  ```
+  .bin .zip .tar .gz .bz2 .xz .7z .rar
+  .exe .msi .dmg .deb .rpm .apk .iso .img
+  .mp4 .mkv .avi .mov .webm .mp3 .flac .wav .aac
+  .pdf .doc .docx .ppt .pptx .wasm
+  ```
+
+  Set to `["*"]` to activate chunked mode for every response regardless of
+  file extension.
+</ParamField>
+
+## Direct Google domain behavior
+
+MHR-CFW can route some Google domains directly through a low-overhead SNI-rewrite tunnel instead of sending them through the full Apps Script relay. The two lists below control which Google destinations get which treatment.
+
+<ParamField body="direct_google_exclude" type="string[]">
+  Google domains that must go through the Apps Script relay. Direct SNI
+  tunneling does not work reliably for these services behind DPI. The default
+  list includes:
+
+  `gemini.google.com`, `aistudio.google.com`, `notebooklm.google.com`,
+  `labs.google.com`, `meet.google.com`, `accounts.google.com`,
+  `ogs.google.com`, `mail.google.com`, `calendar.google.com`,
+  `drive.google.com`, `docs.google.com`, `chat.google.com`,
+  `maps.google.com`, `play.google.com`, `translate.google.com`,
+  `assistant.google.com`, `lens.google.com`
+
+  Any hostnames you add here are merged with the built-in exclude list.
+</ParamField>
+
+<ParamField body="direct_google_allow" type="string[]">
+  Google domains explicitly allowed to use the direct SNI-rewrite tunnel.
+  Default: `["www.google.com", "safebrowsing.google.com"]`.
+
+  Any hostnames you add here are merged with the built-in allow list.
+</ParamField>
+
+<ParamField body="youtube_via_relay" type="boolean" default="false">
+  When `false` (the default), YouTube and related Google-owned domains
+  (`youtube.com`, `ytimg.com`, `ggpht.com`, etc.) are handled through the SNI
+  rewrite path — the proxy rewrites the TLS SNI to `front_domain` while
+  keeping the encrypted `Host` header intact. When `true`, those domains are
+  routed through the Apps Script relay instead, which is slower but gives the
+  relay full control over the request.
+</ParamField>
+
+## SNI pool rotation
+
+When `front_domain` is a Google-owned hostname, MHR-CFW rotates through a pool of Google SNI hostnames on each new outbound TLS handshake. This prevents DPI heuristics from flagging a client that always presents `www.google.com` as the SNI on every connection.
+
+The active pool (`FRONT_SNI_POOL_GOOGLE` in `src/constants.py`) currently rotates through:
+
+- `www.google.com`
+- `mail.google.com`
+- `accounts.google.com`
+
+Benchmarks show that `www.google.com` and `mail.google.com` sustain ~658 KB/s without shaping, while other Google subdomains are throttled to ~16 KB/s by DPI. The pool is intentionally limited to the two unthrottled entries plus `accounts.google.com` as a fallback.
+
+<Note>
+  The SNI pool is not user-configurable from `config.json`. To adjust it,
+  edit `FRONT_SNI_POOL_GOOGLE` in `src/constants.py` directly.
+</Note>
+
+## Example: optimizing for large file downloads
+
+The following snippet tunes MHR-CFW for a user who primarily downloads large archives and videos and has multiple Apps Script deployments available:
+
+<CodeGroup>
+
+```json config.json (large-file profile)
+{
+  "script_ids": [
+    "AKfycb...deployment1...",
+    "AKfycb...deployment2...",
+    "AKfycb...deployment3..."
+  ],
+  "parallel_relay": 3,
+  "chunked_download_min_size": 1048576,
+  "chunked_download_chunk_size": 1048576,
+  "chunked_download_max_parallel": 16,
+  "chunked_download_max_chunks": 512,
+  "chunked_download_extensions": ["*"],
+  "relay_timeout": 45,
+  "max_response_body_bytes": 1073741824
+}
+```
+
+</CodeGroup>
+
+This configuration uses three script deployments with `parallel_relay: 3`, reduces the minimum chunk size to 1 MB, raises the parallel chunk limit to 16, and enables chunked mode for all file types.
+
+## Response cache
+
+MHR-CFW includes a 50 MB in-memory LRU cache for static assets to avoid repeated relay round-trips for resources that do not change between page loads.
+
+<Note>
+  Cache TTL is derived as follows:
+
+  1. If the response has a `Cache-Control: max-age=N` header, the TTL is `min(N, 86400)` seconds.
+  2. If no explicit `max-age` is present, the proxy applies heuristic TTLs based on content type or file extension: **3600 s** for images and fonts, **1800 s** for CSS and JavaScript.
+  3. Dynamic content (`text/html`, `application/json`) and responses with `Set-Cookie`, `no-store`, or `private` directives are never cached.
+
+  The cache is not persisted to disk and is cleared on every restart.
+</Note>

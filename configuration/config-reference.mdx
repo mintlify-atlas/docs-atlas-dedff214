@@ -1,0 +1,188 @@
+---
+title: "Complete MHR-CFW config.json configuration reference"
+description: "Every config.json field for MHR-CFW: required auth_key and script_id, network ports, relay timeouts, TLS options, and environment variable overrides."
+---
+
+`config.json` is the main configuration file for MHR-CFW. You can create it by running `python setup.py`, which walks you through the required values interactively, or by copying `config.example.json` and editing it manually. The proxy reads this file on startup; restart the process to apply changes.
+
+## Example configuration
+
+```json config.example.json
+{
+  "mode": "apps_script",
+  "google_ip": "216.239.38.120",
+  "front_domain": "www.google.com",
+  "script_id": "YOUR_APPS_SCRIPT_DEPLOYMENT_ID",
+  "auth_key": "CHANGE_ME_TO_A_STRONG_SECRET",
+  "listen_host": "127.0.0.1",
+  "socks5_enabled": true,
+  "listen_port": 8085,
+  "socks5_port": 1080,
+  "log_level": "INFO",
+  "verify_ssl": true,
+  "lan_sharing": true,
+  "relay_timeout": 25,
+  "tls_connect_timeout": 15,
+  "tcp_connect_timeout": 10,
+  "max_response_body_bytes": 209715200,
+  "parallel_relay": 1,
+  "chunked_download_extensions": [
+    ".bin", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".exe", ".msi", ".dmg", ".deb", ".rpm", ".apk", ".iso", ".img",
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".mp3", ".flac", ".wav",
+    ".aac", ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".wasm"
+  ],
+  "chunked_download_min_size": 5242880,
+  "chunked_download_chunk_size": 524288,
+  "chunked_download_max_parallel": 8,
+  "chunked_download_max_chunks": 256,
+  "block_hosts": [],
+  "bypass_hosts": ["localhost", ".local", ".lan", ".home.arpa"],
+  "direct_google_exclude": [
+    "gemini.google.com", "aistudio.google.com", "notebooklm.google.com",
+    "labs.google.com", "meet.google.com", "accounts.google.com",
+    "ogs.google.com", "mail.google.com", "calendar.google.com",
+    "drive.google.com", "docs.google.com", "chat.google.com",
+    "maps.google.com", "play.google.com", "translate.google.com",
+    "assistant.google.com", "lens.google.com"
+  ],
+  "direct_google_allow": ["www.google.com", "safebrowsing.google.com"],
+  "youtube_via_relay": false,
+  "hosts": {}
+}
+```
+
+## Required fields
+
+<ParamField body="auth_key" type="string" required>
+  Shared secret used to authenticate relay requests. Must match the `AUTH_KEY`
+  constant inside `Code.gs`. Startup aborts if this is empty or set to a known
+  placeholder value such as `"CHANGE_ME_TO_A_STRONG_SECRET"`. Use a long
+  random string (32+ characters).
+</ParamField>
+
+<ParamField body="script_id" type="string">
+  Deployment ID from your Google Apps Script web app. Copy it from the
+  **Deploy → Manage deployments** panel in the Apps Script editor. For
+  load balancing across multiple deployments, use `script_ids` (an array of
+  strings) instead.
+</ParamField>
+
+## Relay fields
+
+<ParamField body="mode" type="string" default="apps_script">
+  Relay mode. Always `"apps_script"` — this value is force-set on startup for
+  backward compatibility and cannot be changed.
+</ParamField>
+
+<ParamField body="google_ip" type="string" default="216.239.38.120">
+  Google frontend IP used for domain fronting. All relay connections go to this
+  IP regardless of DNS. Run `python main.py --scan` to measure latency across
+  candidate IPs and find the fastest one for your network.
+</ParamField>
+
+<ParamField body="front_domain" type="string" default="www.google.com">
+  SNI hostname presented in TLS handshakes to the network. DPI filters see this
+  hostname; the encrypted `Host` header carries `script.google.com`. Change
+  this only if you know what you are doing — the value must resolve to a Google
+  edge IP that fronts `script.google.com`.
+</ParamField>
+
+## Network fields
+
+<ParamField body="listen_host" type="string" default="127.0.0.1">
+  Network interface the HTTP proxy binds to. Use `"0.0.0.0"` to accept
+  connections from all interfaces. When `lan_sharing` is `true` and this is
+  still `"127.0.0.1"`, the proxy automatically promotes it to `"0.0.0.0"` at
+  startup.
+</ParamField>
+
+<ParamField body="listen_port" type="integer" default="8085">
+  TCP port for the HTTP proxy listener. Configure your browser or system proxy
+  settings to point at this port.
+</ParamField>
+
+<ParamField body="socks5_enabled" type="boolean" default="true">
+  Whether to start the built-in SOCKS5 proxy listener in addition to the HTTP
+  proxy. Disable with `--disable-socks5` on the command line if you do not need
+  SOCKS5.
+</ParamField>
+
+<ParamField body="socks5_port" type="integer" default="1080">
+  TCP port for the SOCKS5 proxy listener. Must differ from `listen_port` when
+  both proxies share the same `listen_host`.
+</ParamField>
+
+<ParamField body="lan_sharing" type="boolean" default="false">
+  When `true`, the proxy automatically binds to all network interfaces
+  (`0.0.0.0`) so other devices on your local network can use it. The startup
+  log prints the concrete LAN IP addresses to share with other devices.
+</ParamField>
+
+## Performance fields
+
+<ParamField body="relay_timeout" type="integer" default="25">
+  Seconds to wait for a response from the Apps Script relay before aborting the
+  request. Increase this on slow networks or if you see frequent timeout errors.
+</ParamField>
+
+<ParamField body="tls_connect_timeout" type="integer" default="15">
+  Seconds allowed for the TLS handshake with the Google frontend. Applies to
+  both the relay connection and direct SNI-rewrite tunnels.
+</ParamField>
+
+<ParamField body="tcp_connect_timeout" type="integer" default="10">
+  Seconds allowed for the TCP connection to complete before it is considered
+  failed.
+</ParamField>
+
+<ParamField body="max_response_body_bytes" type="integer" default="209715200">
+  Maximum response body size in bytes (default is 200 MB). Responses larger
+  than this cap are truncated. Increase the value if you need to download files
+  larger than 200 MB through the relay.
+</ParamField>
+
+<ParamField body="parallel_relay" type="integer" default="1">
+  Number of parallel relay connections to open per request. Values above `1`
+  are useful only when `script_ids` contains multiple deployments.
+</ParamField>
+
+## Logging and TLS fields
+
+<ParamField body="log_level" type="string" default="INFO">
+  Verbosity of the log output. Accepted values: `"DEBUG"`, `"INFO"`,
+  `"WARNING"`, `"ERROR"`. Use `"DEBUG"` to trace individual requests through
+  the relay pipeline.
+</ParamField>
+
+<ParamField body="verify_ssl" type="boolean" default="true">
+  Whether to verify TLS certificates on outbound connections. Set to `false`
+  only in controlled test environments — disabling this exposes you to
+  man-in-the-middle attacks on the relay path.
+</ParamField>
+
+<ParamField body="youtube_via_relay" type="boolean" default="false">
+  When `true`, YouTube traffic is routed through the Apps Script relay instead
+  of the SNI-rewrite path. Use this when the Google frontend IP enforces
+  SafeSearch on the SNI-rewrite path and you want to bypass it.
+</ParamField>
+
+## Environment variable overrides
+
+<Note>
+  The following environment variables override the corresponding `config.json`
+  fields at startup, without modifying the file on disk:
+
+  | Variable | Overrides |
+  |---|---|
+  | `DFT_AUTH_KEY` | `auth_key` |
+  | `DFT_SCRIPT_ID` | `script_id` |
+  | `DFT_PORT` | `listen_port` |
+  | `DFT_HOST` | `listen_host` |
+  | `DFT_SOCKS5_PORT` | `socks5_port` |
+  | `DFT_LOG_LEVEL` | `log_level` |
+
+  CLI arguments (`--port`, `--host`, `--socks5-port`, `--log-level`) take
+  precedence over environment variables, which in turn take precedence over
+  `config.json`.
+</Note>

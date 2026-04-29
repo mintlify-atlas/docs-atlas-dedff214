@@ -1,0 +1,46 @@
+---
+title: "Enable MHR-CFW LAN sharing for local network devices"
+description: "Enable lan_sharing in config.json to bind MHR-CFW to all interfaces so phones, tablets, and other computers on your local network can use the relay proxy."
+---
+
+LAN sharing lets other devices on the same network — phones, tablets, and other computers — use the relay proxy running on your machine. Instead of binding only to `127.0.0.1` (localhost), the proxy listens on all network interfaces so that any device on your local network can connect to it.
+
+## Enable LAN sharing
+
+Set the following in your `config.json`:
+
+```json
+"lan_sharing": true
+```
+
+When `lan_sharing` is `true`, the proxy automatically changes `listen_host` from `127.0.0.1` to `0.0.0.0` (all interfaces) if it is still set to localhost.
+
+## Finding your LAN address
+
+On startup, the proxy detects your machine's IPv4 addresses and logs them so you know which address to give to other devices:
+
+```
+LAN sharing enabled — listening on all interfaces
+LAN HTTP proxy   : 192.168.1.42:8085
+LAN SOCKS5 proxy : 192.168.1.42:1080
+```
+
+Use the logged address to configure other devices. For example, to configure an Android or iOS device, open the Wi-Fi settings for your current network and set the HTTP proxy to `192.168.1.42` port `8085` (substituting your machine's actual IP).
+
+<Warning>
+  Binding to all interfaces exposes the proxy to every device on your local network. Only enable `lan_sharing` on networks you trust. Do not use it on public Wi-Fi — doing so allows any other user on the same network to route their traffic through your relay.
+</Warning>
+
+<Note>
+  Devices that connect over LAN also need the MITM CA certificate installed to intercept HTTPS traffic. Copy the `ca/ca.crt` file from your machine to the other device and install it as a trusted root CA on that device.
+</Note>
+
+<Tip>
+  If you want explicit control over the bind address without using the `lan_sharing` flag, set `listen_host` directly in `config.json`:
+
+  ```json
+  "listen_host": "0.0.0.0"
+  ```
+
+  This has the same effect as `lan_sharing: true` for the bind address, but without the automatic address detection logging.
+</Tip>

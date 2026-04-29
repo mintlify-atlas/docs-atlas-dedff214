@@ -1,0 +1,102 @@
+---
+title: "Set up a browser proxy to use MHR-CFW via FoxyProxy"
+description: "Point Chrome, Edge, Firefox, or your whole operating system at the MHR-CFW HTTP proxy on 127.0.0.1:8085 using FoxyProxy or system proxy settings."
+---
+
+The MHR-CFW local proxy listens on `127.0.0.1:8085` (HTTP) by default. You can configure any browser or application that supports an HTTP proxy to route its traffic through it — no additional software is required beyond the proxy itself.
+
+<Tabs>
+  <Tab title="Chrome / Edge (FoxyProxy)">
+    FoxyProxy lets you switch proxy settings on and off with a single click, which is useful for toggling MHR-CFW without changing system settings.
+
+    <Steps>
+      <Step title="Install FoxyProxy">
+        Install [FoxyProxy](https://chromewebstore.google.com/detail/foxyproxy/gcknhkkoolaabfmlnjonogaaifnjlfnp) from the Chrome Web Store.
+      </Step>
+      <Step title="Open FoxyProxy options">
+        Click the FoxyProxy icon in your browser toolbar, then click **Options**.
+      </Step>
+      <Step title="Add a new proxy">
+        Click **Add**, then set:
+        - **Type**: HTTP
+        - **Host or IP address**: `127.0.0.1`
+        - **Port**: `8085`
+
+        Give the proxy a name (for example, `MHR-CFW`) and save.
+      </Step>
+      <Step title="Enable the proxy">
+        Click the FoxyProxy icon and select your new proxy entry to enable it for all URLs, or configure URL patterns to proxy only specific sites.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Firefox (FoxyProxy)">
+    <Steps>
+      <Step title="Install FoxyProxy Standard">
+        Install [FoxyProxy Standard](https://addons.mozilla.org/en-US/firefox/addon/foxyproxy-standard/) from Mozilla Add-ons.
+      </Step>
+      <Step title="Open FoxyProxy options">
+        Click the FoxyProxy icon in your toolbar, then click **Options**.
+      </Step>
+      <Step title="Add a new proxy">
+        Click **Add**, then set:
+        - **Type**: HTTP
+        - **Hostname**: `127.0.0.1`
+        - **Port**: `8085`
+
+        Save the entry.
+      </Step>
+      <Step title="Enable the proxy">
+        Click the FoxyProxy icon and select **Use proxy for all URLs**.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="System-wide (Windows)">
+    Configuring a system proxy routes all applications that respect system proxy settings through MHR-CFW.
+
+    <Steps>
+      <Step title="Open proxy settings">
+        Go to **Settings** → **Network & Internet** → **Proxy**.
+      </Step>
+      <Step title="Enable manual proxy setup">
+        Under **Manual proxy setup**, toggle the switch to **On**.
+      </Step>
+      <Step title="Enter the proxy address">
+        Set **Address** to `127.0.0.1` and **Port** to `8085`.
+      </Step>
+      <Step title="Save">
+        Click **Save**.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="System-wide (macOS)">
+    <Steps>
+      <Step title="Open network settings">
+        Go to **System Settings** → **Network**, then select your active network connection.
+      </Step>
+      <Step title="Open proxies">
+        Click **Details** (or **Advanced** on older macOS), then select the **Proxies** tab.
+      </Step>
+      <Step title="Enable HTTP proxy">
+        Enable **Web Proxy (HTTP)** and set the server to `127.0.0.1` with port `8085`.
+      </Step>
+      <Step title="Enable HTTPS proxy">
+        Enable **Secure Web Proxy (HTTPS)** and set the server to `127.0.0.1` with port `8085`.
+      </Step>
+      <Step title="Apply">
+        Click **OK**, then **Apply**.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+<Note>
+  The proxy automatically installs a MITM CA certificate on first startup so it can intercept HTTPS traffic. If your browser shows certificate errors after the first run, restart the browser to pick up the newly trusted root.
+</Note>
+
+## Verify your connection
+
+Once the proxy is active, open [ipleak.net](https://ipleak.net) in your browser. You should see a Cloudflare IP address reported as your location — not your real IP. If you still see your real IP, double-check that the proxy is running and that your browser is using the correct proxy settings.
+
+<Tip>
+  FoxyProxy's quick-toggle button makes it easy to enable or disable MHR-CFW without changing your system settings. Use it to switch between proxied and direct browsing in one click.
+</Tip>

@@ -1,0 +1,131 @@
+---
+title: "How MHR-CFW tunnels traffic past DPI using fronting"
+description: "Step-by-step walkthrough of the MHR-CFW relay chain: local MITM TLS, domain fronting through Google Apps Script, and the Cloudflare Worker exit node."
+---
+
+MHR-CFW routes your browser traffic through a chain of three components — a local proxy on your machine, a Google Apps Script relay fronted by `www.google.com`, and a Cloudflare Worker exit node — so that every network observer between you and the internet sees only a TLS handshake to a Google-owned domain. The actual destination URL travels inside an encrypted HTTP body that DPI filters cannot read.
+
+## Traffic flow
+
+```
+Client → Local Proxy → Google/CDN front → GoogleAppsScript (GAS) Relay → Cloudflare Worker → Target website
+             |
+             +-> shows www.google.com to the network DPI filter
+```
+
+The network sees HTTPS traffic to `www.google.com`. The real request is carried inside that encrypted connection, forwarded by the Apps Script relay to the Cloudflare Worker, which fetches the target website and returns the response through the same path.
+
+## Each hop explained
+
+<Steps>
+  <Step title="Browser sends a request to the local proxy">
+    Your browser or application is configured to use the local HTTP (or SOCKS5) proxy running on `127.0.0.1`. Every outbound request — whether HTTP or HTTPS — goes to this proxy first. No traffic leaves your machine unmodified at this stage.
+  </Step>
+  <Step title="Local proxy intercepts HTTPS with MITM TLS">
+    For HTTPS targets, the proxy performs a man-in-the-middle (MITM) TLS interception. It presents the browser with a locally-signed certificate issued by its own CA, decrypts the request, then re-encrypts it as JSON to send upstream. This is why installing the proxy's CA certificate in your browser's trust store is required — without it, the browser rejects the locally-signed certificate.
+  </Step>
+  <Step title="Domain fronting: TLS SNI shows www.google.com">
+    The local proxy opens a TLS connection to a Google edge IP. During the TLS handshake it presents `www.google.com` (or another Google-owned SNI from the rotation pool) as the Server Name Indication. DPI filters inspect the SNI and see a permitted Google domain. The encrypted `Host` header inside the TLS tunnel points to `script.google.com`, routing the connection to your deployed Apps Script relay.
+  </Step>
+  <Step title="Google Apps Script relay forwards the request">
+    The Apps Script relay (`Code.gs`) receives the request as a JSON payload. It validates the shared `AUTH_KEY`, then calls your Cloudflare Worker via `UrlFetchApp.fetch` (single request) or `UrlFetchApp.fetchAll` (batched requests). Because this call originates from Google's own servers, the outbound connection is itself trusted by most networks.
+  </Step>
+  <Step title="Cloudflare Worker fetches the target website">
+    The Cloudflare Worker (`worker.js`) receives the forwarded payload, reconstructs the original HTTP request including headers and body, and fetches the real target URL. It returns the response — status code, headers, and base64-encoded body — back to the Apps Script relay as JSON.
+  </Step>
+  <Step title="Response travels back to your browser">
+    The Apps Script relay returns the JSON response to the local proxy. The proxy decodes the response, re-wraps it in a proper HTTP response, and delivers it to your browser over the locally-terminated TLS session. From the browser's perspective this is indistinguishable from a direct connection.
+  </Step>
+</Steps>
+
+## Domain fronting in detail
+
+Domain fronting exploits the separation between the TLS layer and the HTTP layer. During the TLS handshake, the client sends a `ClientHello` message containing the SNI field, which tells the TLS stack (and any passive network observer) which hostname to expect. MHR-CFW sets this SNI to `www.google.com`.
+
+Once the TLS tunnel is established, the actual HTTP `Host` header — invisible to network observers — is set to `script.google.com`. Google's edge infrastructure routes the request to the matching backend based on the `Host` header, not the SNI. The result: the DPI filter logs a connection to `www.google.com`, while the actual endpoint is your Apps Script deployment.
+
+To reduce the risk of DPI systems detecting a constant single-SNI pattern, the proxy rotates through a pool of Google-owned SNIs on each new outbound TLS connection:
+
+- `www.google.com`
+- `mail.google.com`
+- `accounts.google.com`
+
+## MITM TLS interception
+
+Browsers send HTTPS requests. To relay these through Apps Script as JSON, the local proxy must read the plaintext. It does this by acting as a TLS terminator:
+
+1. The proxy generates a self-signed CA certificate on first run (stored in `ca/ca.crt`).
+2. For each HTTPS destination, it issues a leaf certificate signed by that CA.
+3. The browser accepts this certificate because the CA is installed as a trusted root.
+4. The proxy decrypts the request, serialises it as JSON, and re-encrypts it toward `script.google.com` over the domain-fronted TLS tunnel.
+
+You can install or remove the CA certificate with:
+
+```bash
+python main.py --install-cert
+python main.py --uninstall-cert
+```
+
+## SNI rewriting for YouTube and Google-owned properties
+
+Some Google-owned domains — YouTube in particular — share the same edge IP infrastructure as `www.google.com` but have their direct SNI blocked by certain DPI systems. For these domains, the local proxy connects to the configured `google_ip` and rewrites the TLS SNI to `www.google.com` rather than relaying through Apps Script. This gives those sites full bandwidth without consuming relay quota.
+
+The following domain suffixes trigger SNI rewriting:
+
+| Suffix | Service |
+|---|---|
+| `youtube.com`, `youtu.be`, `youtube-nocookie.com` | YouTube |
+| `ytimg.com`, `ggpht.com` | YouTube CDN / thumbnails |
+| `gvt1.com`, `gvt2.com` | Google Video |
+| `doubleclick.net`, `googlesyndication.com` | Google Ads |
+| `googleadservices.com`, `google-analytics.com` | Google Analytics |
+| `googletagmanager.com`, `googletagservices.com` | Tag Manager |
+| `fonts.googleapis.com` | Google Fonts |
+| `script.google.com` | Apps Script itself |
+
+## Batch relay system
+
+When multiple requests arrive at the proxy concurrently, the fronter groups them into a single Apps Script call rather than opening one TLS connection per request. This reduces overhead on both the Google edge and your Apps Script quota.
+
+The batching is controlled by two windows:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `BATCH_WINDOW_MICRO` | 5 ms | Collect requests arriving in rapid succession |
+| `BATCH_WINDOW_MACRO` | 50 ms | Maximum wait before flushing a partial batch |
+| `BATCH_MAX` | 50 | Maximum requests per Apps Script call |
+
+On the Apps Script side, batched requests are dispatched in parallel using `UrlFetchApp.fetchAll`, so all requests in a batch are sent to the Cloudflare Worker simultaneously and the relay returns all responses in a single JSON object.
+
+## Response cache
+
+The local proxy maintains an LRU in-memory cache to avoid re-fetching the same resources through the relay. Cache capacity defaults to 50 MB. TTL is derived from response headers and URL heuristics:
+
+- **Explicit `Cache-Control: max-age`**: Used directly, capped at 86 400 seconds (24 hours).
+- **Static assets** (images, fonts — `.png`, `.woff2`, etc.): 3 600 seconds.
+- **CSS and JavaScript**: 1 800 seconds.
+- **HTML and JSON**: Not cached (dynamic content).
+- **Responses with `Set-Cookie`, `no-store`, or `private`**: Not cached.
+- **Non-200 responses**: Not cached.
+
+<Note>
+Google-owned domains listed in `GOOGLE_DIRECT_ALLOW_EXACT` — specifically `www.google.com`, `google.com`, and `safebrowsing.google.com` — are routed directly without going through the relay. Hosts listed in the `bypass_hosts` config option are also sent directly with no MITM and no relay, regardless of domain. Use `bypass_hosts` for internal services or domains that should never be intercepted.
+</Note>
+
+## The three components
+
+<CardGroup cols={3}>
+  <Card title="Local proxy" icon="computer">
+    A Python `asyncio` server listening on `127.0.0.1:8085` (HTTP) and `127.0.0.1:1080` (SOCKS5) by default. It performs MITM TLS interception, applies host policies (bypass, block, direct), manages the response cache, and drives the batch relay engine. All configuration lives in `config.json`.
+  </Card>
+  <Card title="GAS relay (Code.gs)" icon="code">
+    A Google Apps Script web app deployed to `script.google.com`. It validates the shared `AUTH_KEY`, accepts both single-request and batched JSON payloads, and forwards each request to the Cloudflare Worker using Google's `UrlFetchApp` service — meaning the outbound call originates from Google's own infrastructure.
+  </Card>
+  <Card title="Cloudflare Worker (worker.js)" icon="cloud">
+    A Cloudflare Worker acting as the exit node. It receives the forwarded request from the Apps Script relay, fetches the real target URL using the Cloudflare edge network, and returns the response (status, headers, base64-encoded body) as JSON. It blocks self-referential requests and loop-detection headers to prevent relay cycles.
+  </Card>
+</CardGroup>
+
+<Tip>
+For a complete breakdown of data structures, connection-pool tuning parameters, and the H2 multiplexing transport, see the [Architecture reference](/reference/architecture).
+</Tip>

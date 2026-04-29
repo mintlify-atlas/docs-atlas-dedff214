@@ -1,0 +1,294 @@
+---
+title: "Code.gs relay for MHR-CFW: request and batch modes"
+description: "Full Code.gs reference: doPost single and batch modes, AUTH_KEY and WORKER_URL constants, JSON request and response schemas, and stripped hop-by-hop headers."
+---
+
+`Code.gs` is the Google Apps Script relay deployed as a web app. It receives JSON POST requests from the local proxy, validates the `AUTH_KEY`, then forwards them to the Cloudflare Worker exit node using `UrlFetchApp`.
+
+<Warning>
+  Change `AUTH_KEY` from the placeholder `"STRONG_SECRET_KEY"` before deploying. Any deployment using that value is publicly exploitable — anyone who knows the endpoint URL can relay arbitrary traffic through your quota.
+</Warning>
+
+## Source
+
+```javascript script/Code.gs
+/**
+ * DomainFront Relay — Google Apps Script With Cloudflare Worker Exit
+ *
+ * FLOW:
+ *   Client → GAS (Google Apps Script) → CFW (Cloudflare Worker) → Internet
+ *
+ * MODES:
+ *   1. Single:  POST { k, m, u, h, b, ct, r }       → { s, h, b }
+ *   2. Batch:   POST { k, q: [{m,u,h,b,ct,r}, ...] } → { q: [{s,h,b}, ...] }
+ *
+ * CHANGE THESE:
+*/
+
+const AUTH_KEY = "STRONG_SECRET_KEY";
+const WORKER_URL = "https://example.workers.dev";
+
+const SKIP_HEADERS = {
+  host: 1, connection: 1, "content-length": 1,
+  "transfer-encoding": 1, "proxy-connection": 1, "proxy-authorization": 1,
+};
+
+function doPost(e) {
+  try {
+    var req = JSON.parse(e.postData.contents);
+    if (req.k !== AUTH_KEY) return _json({ e: "unauthorized" });
+
+    if (Array.isArray(req.q)) return _doBatch(req.q);
+    return _doSingle(req);
+
+  } catch (err) {
+    return _json({ e: String(err) });
+  }
+}
+
+function _doSingle(req) {
+  if (!req.u || typeof req.u !== "string" || !req.u.match(/^https?:\/\//i)) {
+    return _json({ e: "bad url" });
+  }
+
+  var payload = _buildWorkerPayload(req);
+
+  var resp = UrlFetchApp.fetch(WORKER_URL, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+
+  try {
+    return _json(JSON.parse(resp.getContentText()));
+  } catch (e) {
+    return _json({ e: "invalid worker response", raw: resp.getContentText() });
+  }
+}
+
+function _doBatch(items) {
+  var fetchArgs = [];
+  var errorMap = {};
+
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+
+    if (!item.u || typeof item.u !== "string" || !item.u.match(/^https?:\/\//i)) {
+      errorMap[i] = "bad url";
+      continue;
+    }
+
+    var payload = _buildWorkerPayload(item);
+
+    fetchArgs.push({
+      _i: i,
+      _o: {
+        url: WORKER_URL,
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true,
+        followRedirects: true
+      }
+    });
+  }
+
+  var responses = [];
+  if (fetchArgs.length > 0) {
+    responses = UrlFetchApp.fetchAll(fetchArgs.map(function(x) { return x._o; }));
+  }
+
+  var results = [];
+  var rIdx = 0;
+
+  for (var i = 0; i < items.length; i++) {
+    if (errorMap.hasOwnProperty(i)) {
+      results.push({ e: errorMap[i] });
+    } else {
+      var resp = responses[rIdx++];
+      try {
+        results.push(JSON.parse(resp.getContentText()));
+      } catch (e) {
+        results.push({ e: "invalid worker response", raw: resp.getContentText() });
+      }
+    }
+  }
+
+  return _json({ q: results });
+}
+
+function _buildWorkerPayload(req) {
+  var headers = {};
+
+  if (req.h && typeof req.h === "object") {
+    for (var k in req.h) {
+      if (req.h.hasOwnProperty(k) && !SKIP_HEADERS[k.toLowerCase()]) {
+        headers[k] = req.h[k];
+      }
+    }
+  }
+
+  return {
+    u: req.u,
+    m: (req.m || "GET").toUpperCase(),
+    h: headers,
+    b: req.b || null,
+    ct: req.ct || null,
+    r: req.r !== false
+  };
+}
+
+function doGet(e) {
+  return HtmlService.createHtmlOutput(
+    "<!DOCTYPE html><html><head><title>My App</title></head>" +
+      '<body style="font-family:sans-serif;max-width:600px;margin:40px auto">' +
+      "<h1>Relay Active</h1><p>Cloudflare Worker routing enabled.</p>" +
+      "</body></html>"
+  );
+}
+
+function _json(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+```
+
+## Configuration constants
+
+<ParamField body="AUTH_KEY" type="string" required>
+  Shared secret for authentication. Must match `auth_key` in your local `config.json`. Change from the placeholder `"STRONG_SECRET_KEY"` before deploying.
+</ParamField>
+
+<ParamField body="WORKER_URL" type="string" required>
+  Full URL of your deployed Cloudflare Worker, for example `https://myworker.workers.dev`. Change from the placeholder `"https://example.workers.dev"` before deploying.
+</ParamField>
+
+## Request format
+
+The local proxy sends a JSON POST body to the Apps Script web app URL.
+
+**Single request mode** — one request per call:
+
+```json
+{ "k": "AUTH_KEY", "m": "GET", "u": "https://example.com", "h": {}, "b": null, "ct": null, "r": true }
+```
+
+**Batch request mode** — up to 50 requests per call:
+
+```json
+{ "k": "AUTH_KEY", "q": [{ "m": "GET", "u": "https://example.com", "h": {}, "b": null, "ct": null, "r": true }] }
+```
+
+### Request fields
+
+<ParamField body="k" type="string" required>
+  Authentication key. Must equal `AUTH_KEY` in `Code.gs`.
+</ParamField>
+
+<ParamField body="m" type="string" default="GET">
+  HTTP method (`GET`, `POST`, `PUT`, etc.).
+</ParamField>
+
+<ParamField body="u" type="string" required>
+  Target URL. Must start with `http://` or `https://`.
+</ParamField>
+
+<ParamField body="h" type="object">
+  Request headers to forward. Hop-by-hop headers are stripped before forwarding (see `SKIP_HEADERS` below).
+</ParamField>
+
+<ParamField body="b" type="string">
+  Base64-encoded request body. `null` for requests without a body.
+</ParamField>
+
+<ParamField body="ct" type="string">
+  Content-Type of the request body.
+</ParamField>
+
+<ParamField body="r" type="boolean" default="true">
+  Whether to follow redirects. Set to `false` to receive the redirect response directly.
+</ParamField>
+
+<ParamField body="q" type="object[]">
+  Array of request objects for batch mode. Each entry uses the same fields as single mode (`m`, `u`, `h`, `b`, `ct`, `r`), omitting `k`.
+</ParamField>
+
+## Response format
+
+**Single response:**
+
+```json
+{ "s": 200, "h": { "content-type": "text/html" }, "b": "<base64-encoded body>" }
+```
+
+**Batch response:**
+
+```json
+{ "q": [{ "s": 200, "h": {}, "b": "<base64>" }, ...] }
+```
+
+**Error response:**
+
+```json
+{ "e": "error message" }
+```
+
+### Response fields
+
+<ParamField body="s" type="number">
+  HTTP status code returned by the target.
+</ParamField>
+
+<ParamField body="h" type="object">
+  Response headers from the target.
+</ParamField>
+
+<ParamField body="b" type="string">
+  Base64-encoded response body.
+</ParamField>
+
+<ParamField body="e" type="string">
+  Error message. Present only when the relay itself encounters an error (not when the target returns a non-2xx status).
+</ParamField>
+
+## Functions
+
+<ParamField body="doPost(e)" type="function">
+  Entry point for all POST requests. Parses the JSON body, validates `AUTH_KEY`, then routes to `_doSingle` or `_doBatch` depending on whether the `q` array is present.
+</ParamField>
+
+<ParamField body="doGet(e)" type="function">
+  Returns a simple HTML status page with the text "Relay Active". Useful for confirming the deployment is live.
+</ParamField>
+
+<ParamField body="_doSingle(req)" type="function">
+  Validates the target URL, calls `_buildWorkerPayload`, then sends a single POST to `WORKER_URL` using `UrlFetchApp.fetch`.
+</ParamField>
+
+<ParamField body="_doBatch(items)" type="function">
+  Handles an array of relay requests. Uses `UrlFetchApp.fetchAll()` to execute all requests in parallel, preserving response order. Invalid URLs are tracked separately and returned as error entries without blocking the rest of the batch.
+</ParamField>
+
+<ParamField body="_buildWorkerPayload(req)" type="function">
+  Sanitizes the request headers by stripping hop-by-hop headers, then constructs the payload object forwarded to the Cloudflare Worker.
+</ParamField>
+
+## Stripped headers
+
+`_buildWorkerPayload` removes these headers before forwarding to the Worker (`SKIP_HEADERS`):
+
+| Header | Reason |
+|---|---|
+| `host` | Rewritten by the Worker to the target hostname |
+| `connection` | Hop-by-hop; not meaningful across relays |
+| `content-length` | Recalculated by `UrlFetchApp` |
+| `transfer-encoding` | Hop-by-hop; not applicable to JSON relay |
+| `proxy-connection` | Non-standard hop-by-hop header |
+| `proxy-authorization` | Credentials for the local proxy only |
+
+<Note>
+  `UrlFetchApp` on a free Google account allows approximately 20,000 URL fetch calls per day. Batch mode dispatches up to 50 target requests per single `UrlFetchApp.fetchAll()` call, which makes it significantly more quota-efficient under load.
+</Note>

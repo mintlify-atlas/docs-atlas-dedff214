@@ -1,0 +1,75 @@
+---
+title: "Use the MHR-CFW SOCKS5 proxy at 127.0.0.1 port 1080"
+description: "MHR-CFW runs a SOCKS5 server at 127.0.0.1:1080 alongside the HTTP proxy. Configure curl, git, or Python requests to route traffic through the relay."
+---
+
+In addition to the HTTP proxy, MHR-CFW runs a SOCKS5 server on port `1080` by default. SOCKS5 operates at the TCP level, which means it can carry any protocol — not just HTTP and HTTPS. This makes it useful for applications that support SOCKS5 but not HTTP proxies, such as `curl`, `git`, or custom scripts.
+
+## Configuration
+
+SOCKS5 is enabled by default. The relevant config keys in `config.json` are:
+
+```json
+"socks5_enabled": true,
+"socks5_port": 1080
+```
+
+<Warning>
+  `listen_port` and `socks5_port` must be different values on the same host. The proxy validates this on startup and will refuse to start if the two ports conflict.
+</Warning>
+
+## Usage examples
+
+<CodeGroup>
+
+```bash curl
+curl --socks5-hostname 127.0.0.1:1080 https://example.com
+```
+
+```bash git
+git config --global http.proxy socks5h://127.0.0.1:1080
+```
+
+```python Python (requests library)
+import requests
+
+proxies = {
+    "http": "socks5h://127.0.0.1:1080",
+    "https": "socks5h://127.0.0.1:1080",
+}
+resp = requests.get("https://example.com", proxies=proxies)
+```
+
+</CodeGroup>
+
+<Note>
+  Use the `socks5h://` scheme rather than `socks5://`. The `h` suffix tells the client to send the hostname to the proxy for remote DNS resolution instead of resolving it locally. This prevents DNS leaks and ensures that hostnames that are blocked locally still resolve correctly through the relay.
+</Note>
+
+## Disabling SOCKS5
+
+To disable the SOCKS5 listener, set the following in `config.json`:
+
+```json
+"socks5_enabled": false
+```
+
+Or pass the flag at runtime:
+
+```bash
+python main.py --disable-socks5
+```
+
+<Tip>
+  If port `1080` is already in use on your machine, set a custom SOCKS5 port in `config.json`:
+
+  ```json
+  "socks5_port": 1081
+  ```
+
+  Or override it on the command line:
+
+  ```bash
+  python main.py --socks5-port 1081
+  ```
+</Tip>

@@ -1,0 +1,117 @@
+---
+title: "Resolve MITM CA trust errors in MHR-CFW step by step"
+description: "Fix NET::ERR_CERT_AUTHORITY_INVALID by installing ca/ca.crt as a trusted root on Windows, macOS, or Linux. Covers auto-install, manual steps, and Firefox NSS."
+---
+
+MHR-CFW intercepts HTTPS locally using a self-signed CA certificate stored in `ca/ca.crt`. This certificate must be trusted by your browser and OS for HTTPS sites to load without warnings. Without it, your browser treats every HTTPS request the proxy decrypts as an untrusted connection.
+
+## Auto-installation
+
+On startup, the proxy checks whether the CA is already trusted using platform-specific trust-store lookups. If it is not trusted, it logs a warning and attempts to install the certificate automatically:
+
+```
+MITM CA is not trusted — attempting automatic installation…
+```
+
+If auto-installation succeeds, the next log line confirms it. If it fails, the proxy logs an error and continues running — HTTPS sites will show certificate errors in the browser until you install the certificate manually.
+
+```
+Auto-install failed. Run with --install-cert (may need admin/sudo)
+or manually install ca/ca.crt as a trusted root CA.
+```
+
+## Manual installation
+
+<Steps>
+  <Step title="Windows">
+    Run the installer as Administrator:
+
+    ```bash
+    python main.py --install-cert
+    ```
+
+    Or install manually:
+    1. Double-click `ca/ca.crt`.
+    2. Click **Install Certificate**.
+    3. Select **Local Machine**, then click **Next**.
+    4. Choose **Place all certificates in the following store**, click **Browse**, and select **Trusted Root Certification Authorities**.
+    5. Click **Next**, then **Finish**.
+  </Step>
+  <Step title="macOS">
+    Run the installer with sudo:
+
+    ```bash
+    sudo python main.py --install-cert
+    ```
+
+    Or install manually:
+    1. Double-click `ca/ca.crt` to open it in **Keychain Access**.
+    2. In the dialog, choose the **System** keychain and click **Add**.
+    3. Find the newly added certificate (search for `mhr-cfw`), double-click it, expand **Trust**, and set **When using this certificate** to **Always Trust**.
+    4. Close the window — macOS will prompt for your password to save the change.
+  </Step>
+  <Step title="Linux">
+    Run the installer with sudo:
+
+    ```bash
+    sudo python main.py --install-cert
+    ```
+
+    Or install manually (Debian/Ubuntu):
+
+    ```bash
+    sudo cp ca/ca.crt /usr/local/share/ca-certificates/mhr-cfw.crt
+    sudo update-ca-certificates
+    ```
+
+    On RHEL/Fedora/CentOS:
+
+    ```bash
+    sudo cp ca/ca.crt /etc/pki/ca-trust/source/anchors/mhr-cfw.crt
+    sudo update-ca-trust extract
+    ```
+  </Step>
+</Steps>
+
+## Uninstall the certificate
+
+To remove the CA from your system trust store:
+
+```bash
+python main.py --uninstall-cert
+```
+
+## Skip the certificate check
+
+You can bypass the trust check on startup with:
+
+```bash
+python main.py --no-cert-check
+```
+
+The proxy will still run, but HTTPS sites may show certificate warnings in the browser because the CA is not trusted. Use this only for testing or if you are managing certificate trust separately.
+
+## Common certificate error messages
+
+<AccordionGroup>
+  <Accordion title="NET::ERR_CERT_AUTHORITY_INVALID">
+    The CA certificate is not trusted by your browser or OS. Run `python main.py --install-cert` (with admin or sudo if needed), then restart your browser completely.
+  </Accordion>
+  <Accordion title="MITM CA is not trusted — attempting automatic installation…">
+    The proxy detected that the CA is not trusted and is trying to install it automatically. Watch the next log line: it will report either success or failure. If it fails, install manually using the steps above.
+  </Accordion>
+  <Accordion title="Auto-install failed">
+    The proxy could not install the certificate without elevated privileges. Re-run with `--install-cert` as Administrator (Windows) or with `sudo` (macOS/Linux), or follow the manual installation steps for your platform.
+  </Accordion>
+  <Accordion title="Certificate installed but browser still shows errors">
+    The browser caches its trusted root list at startup. After installing the certificate, restart your browser completely — closing all windows, not just the tab — for the new trust to take effect.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  After installing or reinstalling the certificate, restart your browser completely (all windows, not just the current tab) for the updated trust store to be recognized.
+</Warning>
+
+<Tip>
+  Firefox maintains its own certificate store separate from the OS. The `--install-cert` command attempts to install into all detected Firefox profiles automatically via the NSS `certutil` tool. If that fails, go to **Firefox Settings** → **Privacy & Security** → **Certificates** → **View Certificates** → **Authorities** → **Import**, and select `ca/ca.crt`.
+</Tip>

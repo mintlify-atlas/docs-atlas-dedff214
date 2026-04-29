@@ -1,0 +1,70 @@
+---
+title: "MHR-CFW environment variables and precedence rules"
+description: "All MHR-CFW environment variables: DFT_AUTH_KEY, DFT_SCRIPT_ID, DFT_PORT, DFT_HOST, DFT_SOCKS5_PORT, DFT_LOG_LEVEL, plus CLI flag vs env var precedence rules."
+---
+
+MHR-CFW reads environment variables at startup to override `config.json` values. This is especially useful for Docker deployments where you don't want to mount a config file, and for CI environments where secrets should not be stored on disk.
+
+<Note>
+  `DFT_AUTH_KEY` and `DFT_SCRIPT_ID` always override the corresponding `config.json` values when set. The remaining variables (`DFT_PORT`, `DFT_HOST`, `DFT_SOCKS5_PORT`, `DFT_LOG_LEVEL`) only take effect when the corresponding CLI flag is not provided — the CLI flag wins if both are set.
+</Note>
+
+## Variables
+
+<ParamField body="DFT_CONFIG" type="string" default="config.json">
+  Path to the config file. Equivalent to `-c / --config`. Useful when running the proxy from a directory that does not contain `config.json`.
+</ParamField>
+
+<ParamField body="DFT_AUTH_KEY" type="string">
+  Shared secret for relay authentication. Overrides `auth_key` in `config.json`. Always applied when set, regardless of whether `--config` is also used.
+</ParamField>
+
+<ParamField body="DFT_SCRIPT_ID" type="string">
+  Google Apps Script Deployment ID. Overrides `script_id` in `config.json`. Always applied when set.
+</ParamField>
+
+<ParamField body="DFT_PORT" type="integer">
+  HTTP proxy listen port. Overrides `listen_port` in `config.json`. Ignored if `--port` is also provided on the command line.
+</ParamField>
+
+<ParamField body="DFT_HOST" type="string">
+  Listen host. Overrides `listen_host` in `config.json`. Ignored if `--host` is also provided on the command line.
+</ParamField>
+
+<ParamField body="DFT_SOCKS5_PORT" type="integer">
+  SOCKS5 listen port. Overrides `socks5_port` in `config.json`. Ignored if `--socks5-port` is also provided on the command line.
+</ParamField>
+
+<ParamField body="DFT_LOG_LEVEL" type="string">
+  Log verbosity. Accepted values: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Overrides `log_level` in `config.json`. Ignored if `--log-level` is also provided on the command line.
+</ParamField>
+
+## Precedence order
+
+The effective value for each setting is resolved in this order, from highest to lowest priority:
+
+1. **CLI flag** — provided directly on the command line (e.g. `--port 8080`)
+2. **Environment variable** — set in the shell or container environment
+3. **`config.json`** — the value in the loaded config file
+4. **Built-in default** — the proxy's compiled-in default if the key is absent from config
+
+Note that `DFT_AUTH_KEY` and `DFT_SCRIPT_ID` are applied unconditionally and do not follow the CLI-flag-first pattern. They always override config.json when present.
+
+## Docker example
+
+```bash
+docker run -d mhr-cfw \
+  -e DFT_AUTH_KEY=mysecret \
+  -e DFT_SCRIPT_ID=AKfycb...deploymentId \
+  -e DFT_LOG_LEVEL=DEBUG \
+  -p 8085:8085 \
+  -p 1080:1080
+```
+
+<Tip>
+  Use `docker run --env-file .env` to load variables from a `.env` file instead of passing them inline. This keeps secrets out of your shell history and process list.
+
+  ```bash
+  docker run -d --env-file .env -p 8085:8085 -p 1080:1080 mhr-cfw
+  ```
+</Tip>

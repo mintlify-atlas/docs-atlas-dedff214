@@ -1,0 +1,83 @@
+---
+title: "MHR-CFW: bypass internet censorship with DPI evasion"
+description: "MHR-CFW routes traffic through Google Apps Script and Cloudflare Workers. DPI filters see only Google traffic while the real destination stays hidden."
+---
+
+MHR-CFW (MasterHttpRelay + Cloudflare Worker) is an open-source tool that lets you access blocked websites by routing your traffic through Google's infrastructure. From the perspective of any DPI (Deep Packet Inspection) filter on the network, your connection looks like normal HTTPS traffic to `www.google.com` — while the actual destination stays hidden inside the relay.
+
+<Warning>
+MHR-CFW is provided for educational, testing, and research purposes only. You are solely responsible for complying with all applicable laws and regulations, as well as Google's Terms of Service, before using this software.
+</Warning>
+
+## How it works at a glance
+
+Your browser connects to a local proxy running on your machine. That proxy forwards requests through Google Apps Script — fronted by `www.google.com` — to a Cloudflare Worker, which fetches the real destination and returns the response through the same path.
+
+```
+Browser → Local Proxy → www.google.com (SNI) → Google Apps Script → Cloudflare Worker → Target
+```
+
+The network's DPI filter sees only a TLS handshake to `www.google.com`. The encrypted payload carries the real request to `script.google.com`, which your deployed relay handles.
+
+## Quick navigation
+
+<CardGroup cols={2}>
+  <Card title="How it works" icon="diagram-project" href="/how-it-works">
+    Deep dive into the domain-fronting architecture and traffic flow
+  </Card>
+  <Card title="Set up Cloudflare Worker" icon="cloud" href="/setup/cloudflare-worker">
+    Deploy the exit node that fetches your target URLs
+  </Card>
+  <Card title="Set up Google Apps Script" icon="code" href="/setup/google-apps-script">
+    Deploy the relay that routes traffic through Google infrastructure
+  </Card>
+  <Card title="Run the local proxy" icon="terminal" href="/setup/local-proxy">
+    Install dependencies and start the HTTP/SOCKS5 proxy on your machine
+  </Card>
+  <Card title="Configuration reference" icon="gear" href="/configuration/config-reference">
+    All config.json options with types, defaults, and descriptions
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/troubleshooting/common-errors">
+    Fix certificate errors, relay failures, and connection problems
+  </Card>
+</CardGroup>
+
+## Get started in 4 steps
+
+<Steps>
+  <Step title="Deploy the Cloudflare Worker">
+    Create a free Cloudflare Workers account and deploy `script/worker.js` as your exit node. This worker receives requests from the Apps Script relay and fetches the actual destination URLs.
+  </Step>
+  <Step title="Deploy the Google Apps Script relay">
+    Create a new Google Apps Script project, paste in `script/Code.gs`, set your `AUTH_KEY` and `WORKER_URL`, then deploy it as a web app accessible to anyone.
+  </Step>
+  <Step title="Configure and start the local proxy">
+    Clone the repository, install Python dependencies, and run `python setup.py` to create your `config.json`. Then start the proxy with `python main.py` or `run.bat` / `run.sh`.
+  </Step>
+  <Step title="Point your browser at the proxy">
+    Configure your browser or system to use the local HTTP proxy at `127.0.0.1:8085` (or the SOCKS5 proxy at `127.0.0.1:1080`). Verify your connection at [ipleak.net](https://ipleak.net) — you should see a Cloudflare IP address.
+  </Step>
+</Steps>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Domain fronting" icon="shield">
+    SNI shows `www.google.com` to the network while encrypted traffic routes through `script.google.com`
+  </Card>
+  <Card title="HTTP + SOCKS5 proxy" icon="network-wired">
+    Dual local proxy servers — use whichever protocol your application supports
+  </Card>
+  <Card title="MITM TLS interception" icon="lock">
+    Locally decrypts HTTPS so requests can be relayed as JSON through Apps Script
+  </Card>
+  <Card title="SNI rewrite" icon="rotate">
+    Automatically rewrites SNI for YouTube and other blocked Google-owned properties
+  </Card>
+  <Card title="Chunked downloads" icon="download">
+    Parallel chunked download support for large files (videos, archives, ISOs)
+  </Card>
+  <Card title="LAN sharing" icon="share-nodes">
+    Share the proxy with other devices on your local network with a single config toggle
+  </Card>
+</CardGroup>

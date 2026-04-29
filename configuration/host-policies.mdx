@@ -1,0 +1,79 @@
+---
+title: "MHR-CFW host policies: bypass, block, and DNS override"
+description: "Configure MHR-CFW's three host routing tables: block_hosts to refuse connections, bypass_hosts for direct tunnels, and the hosts map for DNS overrides."
+---
+
+MHR-CFW evaluates three per-host policy tables for every connection before deciding how to route it. You configure all three in `config.json`. Policies are checked in this order: `block_hosts` → `bypass_hosts` → relay. The `hosts` map is an independent DNS override that applies before any real DNS lookup.
+
+## `bypass_hosts`
+
+Hosts in `bypass_hosts` are routed directly to the origin — no MITM, no relay, no SNI rewrite. The connection is a plain pass-through at the TCP level.
+
+**Default:**
+
+```json
+"bypass_hosts": ["localhost", ".local", ".lan", ".home.arpa"]
+```
+
+Use this for local services, internal network hosts, and any destination that does not need to go through the relay.
+
+**Example:**
+
+```json
+"bypass_hosts": ["localhost", ".local", ".lan", ".home.arpa", "192.168.1.1"]
+```
+
+<Tip>
+  Add your local development services (e.g. `localhost`, `myapp.local`) to
+  `bypass_hosts` so their traffic is never routed through the relay. This
+  avoids unnecessary latency and keeps local traffic off the relay entirely.
+</Tip>
+
+## `block_hosts`
+
+Hosts in `block_hosts` are refused entirely. The proxy closes the connection or returns an HTTP 403 response without forwarding anything.
+
+**Default:** `[]` (empty — nothing is blocked)
+
+Use this to block ad servers, tracking domains, or any host you want to prevent from being reachable through the proxy.
+
+**Example:**
+
+```json
+"block_hosts": ["ads.example.com", ".doubleclick.net"]
+```
+
+## `hosts` map
+
+The `hosts` map is a DNS override table. It maps a hostname or suffix pattern to an IP address. The proxy checks this table before issuing any real DNS lookup, so it takes effect for all traffic that passes through the proxy.
+
+**Default:** `{}` (empty — no overrides)
+
+Use this to force a domain to connect to a specific IP address, for example when DNS is poisoned, when you want to pin a service to a known IP, or for internal services that are not in public DNS.
+
+**Example:**
+
+```json
+"hosts": {
+  "example.com": "93.184.216.34",
+  "api.myservice.com": "10.0.0.5"
+}
+```
+
+## Matching rules
+
+All three tables — `bypass_hosts`, `block_hosts`, and `hosts` — use the same matching logic:
+
+- **Suffix match:** Entries starting with `.` (for example `.internal`) match any subdomain. `.local` matches `foo.local`, `bar.local`, and so on.
+- **Exact match:** All other entries are matched against the full hostname.
+- **Case-insensitive:** Hostnames are normalized to lowercase before comparison.
+- **Trailing dots stripped:** `example.com.` and `example.com` are treated as equivalent.
+
+**Precedence:** `block_hosts` is checked first, then `bypass_hosts`, then the relay pipeline. A host in both lists is blocked.
+
+<Warning>
+  `block_hosts` and `bypass_hosts` apply only to HTTP and HTTPS traffic
+  handled by the HTTP proxy. Non-HTTP connections through the SOCKS5 proxy
+  (for example, raw TCP tunnels on non-standard ports) are passed through
+  directly and are not subject to these policies.
+</Warning>

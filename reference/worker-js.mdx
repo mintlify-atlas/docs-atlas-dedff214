@@ -1,0 +1,209 @@
+---
+title: "worker.js: Cloudflare Worker exit node full reference"
+description: "Complete worker.js reference: fetch handler, WORKER_URL constant, JSON request and response schemas, loop detection via x-relay-hop, and self-fetch protection."
+---
+
+`worker.js` is the Cloudflare Worker that acts as the exit node for MHR-CFW. It receives JSON requests from the Google Apps Script relay, fetches the target URL on behalf of the relay, and returns the response as base64-encoded JSON.
+
+<Warning>
+  Set `WORKER_URL` to your worker's actual hostname before deploying. If it does not match your real worker URL, the self-fetch protection check will not function correctly and the worker could be made to fetch itself in a loop.
+</Warning>
+
+## Source
+
+```javascript script/worker.js
+const WORKER_URL = "myworker.workers.dev";
+
+export default {
+  async fetch(request) {
+    try {
+      if (request.headers.get("x-relay-hop") === "1") {
+        return json({ e: "loop detected" }, 508);
+      }
+
+      const req = await request.json();
+
+      if (!req.u) {
+        return json({ e: "missing url" }, 400);
+      }
+
+      const targetUrl = new URL(req.u);
+
+      const BLOCKED_HOSTS = [
+        WORKER_URL,
+      ];
+
+      if (BLOCKED_HOSTS.some(h => targetUrl.hostname.endsWith(h))) {
+        return json({ e: "self-fetch blocked" }, 400);
+      }
+
+      const headers = new Headers();
+      if (req.h && typeof req.h === "object") {
+        for (const [k, v] of Object.entries(req.h)) {
+          headers.set(k, v);
+        }
+      }
+
+      headers.set("x-relay-hop", "1");
+
+      const fetchOptions = {
+        method: (req.m || "GET").toUpperCase(),
+        headers,
+        redirect: req.r === false ? "manual" : "follow"
+      };
+
+      if (req.b) {
+        const binary = Uint8Array.from(atob(req.b), c => c.charCodeAt(0));
+        fetchOptions.body = binary;
+      }
+
+      const resp = await fetch(targetUrl.toString(), fetchOptions);
+
+      // Read response safely (no stack overflow)
+      const buffer = await resp.arrayBuffer();
+      const uint8 = new Uint8Array(buffer);
+
+      let binary = "";
+      const chunkSize = 0x8000; // prevent call stack overflow
+
+      for (let i = 0; i < uint8.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(
+          null,
+          uint8.subarray(i, i + chunkSize)
+        );
+      }
+
+      const base64 = btoa(binary);
+
+      const responseHeaders = {};
+      resp.headers.forEach((v, k) => {
+        responseHeaders[k] = v;
+      });
+
+      return json({
+        s: resp.status,
+        h: responseHeaders,
+        b: base64
+      });
+
+    } catch (err) {
+      return json({ e: String(err) }, 500);
+    }
+  }
+};
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "content-type": "application/json"
+    }
+  });
+}
+```
+
+## Configuration
+
+<ParamField body="WORKER_URL" type="string">
+  The worker's own hostname, for example `myworker.workers.dev`. Used to detect self-fetch loops — any incoming request whose target URL hostname ends with this value is rejected. Must be updated to match your actual deployed worker URL.
+</ParamField>
+
+## Request format
+
+The Apps Script relay sends a JSON POST body to the Worker.
+
+```json
+{
+  "u": "https://example.com/path",
+  "m": "GET",
+  "h": { "accept": "text/html" },
+  "b": null,
+  "r": true
+}
+```
+
+### Request fields
+
+<ParamField body="u" type="string" required>
+  Target URL to fetch. Must be a valid absolute URL.
+</ParamField>
+
+<ParamField body="m" type="string" default="GET">
+  HTTP method for the outbound request (`GET`, `POST`, `PUT`, `DELETE`, etc.).
+</ParamField>
+
+<ParamField body="h" type="object">
+  Headers to include in the outbound request. The worker adds `x-relay-hop: 1` automatically regardless of what is passed here.
+</ParamField>
+
+<ParamField body="b" type="string">
+  Base64-encoded request body. Decoded to binary before sending. Omit or set to `null` for requests without a body.
+</ParamField>
+
+<ParamField body="r" type="boolean" default="true">
+  Whether to follow HTTP redirects. When `false`, the redirect response is returned directly with its `location` header intact.
+</ParamField>
+
+## Response format
+
+**Success:**
+
+```json
+{ "s": 200, "h": { "content-type": "text/html; charset=utf-8" }, "b": "<base64-encoded body>" }
+```
+
+**Error:**
+
+```json
+{ "e": "error message" }
+```
+
+### Response fields
+
+<ParamField body="s" type="number">
+  HTTP status code from the target server.
+</ParamField>
+
+<ParamField body="h" type="object">
+  All response headers returned by the target, collected via `resp.headers.forEach`.
+</ParamField>
+
+<ParamField body="b" type="string">
+  Base64-encoded response body. The worker reads the full response as an `ArrayBuffer` and converts it to base64 in 32 KB chunks to prevent call stack overflows on large responses.
+</ParamField>
+
+<ParamField body="e" type="string">
+  Error message. Present only when the worker itself cannot complete the request (network error, blocked host, loop detection, etc.).
+</ParamField>
+
+## Safety checks
+
+The worker applies two checks before making any outbound request.
+
+### Loop detection
+
+If the incoming request from the Apps Script relay contains the header `x-relay-hop: 1`, the worker immediately returns:
+
+```json
+{ "e": "loop detected" }
+```
+
+with HTTP status `508 Loop Detected`. The worker sets `x-relay-hop: 1` on every outbound request it makes, so any relay chain that accidentally routes back through the same worker instance is terminated immediately.
+
+### Self-fetch protection
+
+If the target URL's hostname ends with the `WORKER_URL` constant, the worker returns:
+
+```json
+{ "e": "self-fetch blocked" }
+```
+
+with HTTP status `400 Bad Request`. This prevents a request from causing the worker to call itself directly (bypassing the loop detection header).
+
+## Response body handling
+
+The worker reads the entire response into an `ArrayBuffer`, wraps it in a `Uint8Array`, and iterates over it in 32 KB (`0x8000` byte) chunks using `String.fromCharCode.apply`. This chunked approach avoids the JavaScript call stack overflow that would occur when calling `String.fromCharCode.apply(null, largeArray)` on large response bodies. The resulting binary string is encoded with `btoa` before being returned.
+
+<Note>
+  The free Cloudflare Workers plan includes 100,000 requests per day with no cold starts within the 128 MB memory / 10 ms CPU time budget per invocation. Most relay requests fit well within those limits.
+</Note>

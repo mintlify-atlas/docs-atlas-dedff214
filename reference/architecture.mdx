@@ -1,0 +1,105 @@
+---
+title: "MHR-CFW system architecture and component overview"
+description: "ProxyServer, DomainFronter, and MITMCertManager internals: connection pool, batch relay windows, response cache TTLs, and the traffic routing decision tree."
+---
+
+MHR-CFW has three major components that work together to relay your traffic past DPI filters: the local proxy server that accepts browser connections, the domain-fronting relay engine that tunnels requests through Google Apps Script, and the cloud-side scripts (Apps Script relay and Cloudflare Worker) that fetch target URLs from the open internet.
+
+## Component overview
+
+<CardGroup cols={3}>
+  <Card title="ProxyServer" icon="server">
+    The local async HTTP and SOCKS5 server. Accepts browser connections on `127.0.0.1:8085` (HTTP) and `127.0.0.1:1080` (SOCKS5) by default. Applies host-level policy (block, bypass, SNI-rewrite, direct, relay), drives MITM TLS interception, manages the response cache, and dispatches requests to `DomainFronter`.
+  </Card>
+  <Card title="DomainFronter" icon="arrow-right-left">
+    The relay engine that forwards requests to `script.google.com` over a TLS connection whose SNI shows `www.google.com`. Maintains a pool of persistent TLS connections, batches concurrent requests into single Apps Script calls, and handles response decoding and caching hints.
+  </Card>
+  <Card title="MITMCertManager" icon="shield-check">
+    Generates a self-signed CA on first run and signs per-host leaf certificates on demand. Lets the proxy decrypt the browser's HTTPS traffic locally so it can re-encode requests as JSON and forward them through the relay.
+  </Card>
+</CardGroup>
+
+## Traffic routing decision tree
+
+When `ProxyServer` receives a connection it evaluates the target host against an ordered set of rules. The first rule that matches determines how the connection is handled.
+
+<Steps>
+  <Step title="Block list check">
+    If the host matches a rule in `block_hosts` (exact hostname or leading-dot suffix, e.g. `.ads.example.com`), the proxy returns `403 Forbidden` and closes the connection. No traffic is forwarded.
+  </Step>
+  <Step title="Bypass list check">
+    If the host matches a rule in `bypass_hosts`, the proxy opens a direct TCP tunnel to the target — no MITM, no relay, no decryption. Use this for internal services or domains that should never be intercepted.
+  </Step>
+  <Step title="IP literal handling">
+    If the host is an IPv4 or IPv6 literal, the proxy attempts a direct TCP tunnel with a 4-second connect timeout. If the direct connection succeeds, it is used as-is. If it fails (common for blocked Telegram data-center IPs), the proxy falls back: port 443 gets MITM + relay through Apps Script; port 80 gets plain HTTP relay; any other port is abandoned (non-HTTP payloads cannot be relayed). The failure is remembered for 5 minutes so subsequent connects skip the doomed direct attempt.
+  </Step>
+  <Step title="SNI-rewrite suffixes (YouTube, Google Video, etc.)">
+    If the host matches one of the `SNI_REWRITE_SUFFIXES` — domains like `youtube.com`, `ytimg.com`, and `googlesyndication.com` — the proxy MITM-decrypts the browser's TLS session, then re-connects to `google_ip` (default `216.239.38.120`) with the TLS SNI set to `front_domain` (default `www.google.com`) instead of the real hostname. The ISP sees `www.google.com`; Google's edge routes to YouTube based on the encrypted `Host` header.
+  </Step>
+  <Step title="Safe Google domains — direct tunnel">
+    If the host is in `GOOGLE_DIRECT_ALLOW_EXACT` — specifically `www.google.com`, `google.com`, and `safebrowsing.google.com` — the proxy opens a direct TCP tunnel without MITM or relay. This keeps latency low for Google Search and Safe Browsing lookups.
+  </Step>
+  <Step title="Port 443 — MITM + relay">
+    All other port-443 connections go through full MITM TLS interception followed by relay through the Apps Script deployment.
+  </Step>
+  <Step title="Port 80 — plain HTTP relay">
+    Plain HTTP traffic on port 80 is relayed through Apps Script without any TLS interception.
+  </Step>
+  <Step title="Other ports — direct TCP tunnel">
+    Non-HTTP ports (e.g. `5228` for XMPP push, IMAP, SMTP, SSH) carry payloads that cannot be relayed as JSON. The proxy opens a direct TCP tunnel and pipes bytes without interception.
+  </Step>
+</Steps>
+
+## Connection pool
+
+`DomainFronter` maintains a pool of persistent TLS connections to the Google edge. Each connection uses TCP to `google_ip` (default `216.239.38.120`) with the TLS SNI set to a host from the rotation pool (see [SNI rotation](/reference/domain-fronting#sni-rotation)).
+
+| Parameter | Value | Description |
+|---|---|---|
+| `POOL_MAX` | 50 | Maximum connections kept open simultaneously |
+| `POOL_MIN_IDLE` | 15 | Target number of idle connections kept warm |
+| `CONN_TTL` | 45 s | Maximum age of a connection before it is discarded |
+| `WARM_POOL_COUNT` | 30 | Connections pre-opened at startup |
+
+When a request needs a connection, `_acquire()` pops the youngest healthy connection from the pool and immediately schedules a background task to replace it. If the pool is empty, a new TLS connection is opened and a background refill is triggered. Connections older than `CONN_TTL` or whose peer has closed the read side are discarded rather than reused.
+
+If the `h2` Python package is installed, `DomainFronter` instantiates an `H2Transport` that replaces the entire pool with a single multiplexed HTTP/2 connection. One TLS handshake carries up to 100 concurrent streams, eliminating per-request handshake overhead.
+
+## Batch relay
+
+Requests that arrive at `DomainFronter` within the same time window are grouped into a single Apps Script call rather than one TLS round-trip each.
+
+| Constant | Value | Description |
+|---|---|---|
+| `BATCH_WINDOW_MICRO` | 5 ms | Collect requests arriving in rapid succession |
+| `BATCH_WINDOW_MACRO` | 50 ms | Hard deadline before flushing a partial batch |
+| `BATCH_MAX` | 50 | Maximum requests per Apps Script invocation |
+
+On the Apps Script side, the relay dispatches all requests in a batch simultaneously using `UrlFetchApp.fetchAll()` and returns all responses in a single JSON object. This reduces both TLS connection count and Apps Script quota usage compared to one-request-per-call.
+
+## Response cache
+
+`ProxyServer` maintains an LRU in-memory cache to avoid relaying the same static resources repeatedly.
+
+The cache only stores `GET` responses that meet all of the following criteria:
+
+- HTTP status `200`
+- No `Set-Cookie`, `no-store`, or `private` directives
+- No `Cookie`, `Authorization`, `Range`, or conditional request headers on the incoming request
+- URL matches a static asset pattern (see `STATIC_EXTS` in `constants.py`)
+
+TTL is derived in this order:
+
+1. Explicit `Cache-Control: max-age` header, capped at `CACHE_TTL_MAX` (86 400 s)
+2. Images and fonts: `CACHE_TTL_STATIC_LONG` (3 600 s)
+3. CSS and JavaScript: `CACHE_TTL_STATIC_MED` (1 800 s)
+4. HTML and JSON: not cached (0 s)
+
+| Constant | Value | Description |
+|---|---|---|
+| `CACHE_MAX_MB` | 50 MB | Maximum total cache size |
+| `CACHE_TTL_MAX` | 86 400 s | Hard cap on any `max-age` value |
+| `CACHE_TTL_STATIC_LONG` | 3 600 s | TTL for images and fonts |
+| `CACHE_TTL_STATIC_MED` | 1 800 s | TTL for CSS and JavaScript |
+
+Individual entries larger than one quarter of `CACHE_MAX_MB` (12.5 MB) are never stored. When the cache is full, oldest entries are evicted to make room for new ones.

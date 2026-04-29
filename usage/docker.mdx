@@ -1,0 +1,81 @@
+---
+title: "Containerize MHR-CFW with Docker and Docker Compose"
+description: "Build the MHR-CFW Docker image, mount config.json or pass DFT_AUTH_KEY and DFT_SCRIPT_ID as env vars, and expose HTTP port 8085 and SOCKS5 port 1080."
+---
+
+While MHR-CFW ships with a Dockerfile in the repository root, running it in a container requires a pre-configured `config.json`. The interactive setup wizard requires a TTY and will not work inside a non-interactive container, so you must prepare the config file before building or running the image.
+
+## Build the image
+
+```bash
+docker build -t mhr-cfw .
+```
+
+## Run with a mounted config
+
+Mount your `config.json` into the container and expose both proxy ports:
+
+```bash
+docker run -d \
+  --name mhr-cfw \
+  -p 8085:8085 \
+  -p 1080:1080 \
+  -v $(pwd)/config.json:/app/config.json \
+  -e DFT_AUTH_KEY=your-secret \
+  -e DFT_SCRIPT_ID=your-deployment-id \
+  mhr-cfw
+```
+
+<Note>
+  Inside Docker, set `"listen_host": "0.0.0.0"` in your `config.json` so the proxy binds to all interfaces within the container. Without this, the proxy binds only to `127.0.0.1` and is not reachable from outside the container, even with `-p` port mapping.
+</Note>
+
+## Environment variables
+
+You can pass configuration values as environment variables instead of — or in addition to — `config.json`. Environment variables take precedence over config file values.
+
+| Variable | Description |
+|---|---|
+| `DFT_AUTH_KEY` | Authentication key (must match `AUTH_KEY` in `Code.gs`) |
+| `DFT_SCRIPT_ID` | Google Apps Script deployment ID |
+| `DFT_PORT` | Override the HTTP proxy listen port |
+| `DFT_HOST` | Override the listen host |
+| `DFT_SOCKS5_PORT` | Override the SOCKS5 listen port |
+| `DFT_LOG_LEVEL` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+
+## Docker Compose
+
+```yaml
+services:
+  mhr-cfw:
+    build: .
+    ports:
+      - "8085:8085"
+      - "1080:1080"
+    volumes:
+      - ./config.json:/app/config.json
+    environment:
+      - DFT_AUTH_KEY=your-secret-here
+      - DFT_SCRIPT_ID=your-deployment-id
+    restart: unless-stopped
+```
+
+<Warning>
+  The automatic MITM CA certificate installation does not work inside Docker. You must manually extract `ca/ca.crt` from the container and install it as a trusted root CA on any client that will use the proxy:
+
+  ```bash
+  docker cp mhr-cfw:/app/ca/ca.crt ./ca.crt
+  ```
+
+  Then install `ca.crt` on your client device using the appropriate system trust store.
+</Warning>
+
+<Tip>
+  To suppress the CA trust check warning at startup, pass the `--no-cert-check` flag via the container's command:
+
+  ```bash
+  docker run ... mhr-cfw python main.py --no-cert-check
+  ```
+
+  Or set it as the default command in your `docker-compose.yml` by adding `command: python main.py --no-cert-check` to the service definition.
+</Tip>

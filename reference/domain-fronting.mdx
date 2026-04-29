@@ -1,0 +1,81 @@
+---
+title: "How MHR-CFW domain fronting hides SNI from censors"
+description: "How MHR-CFW hides destinations: TLS SNI shows www.google.com while the encrypted Host routes to script.google.com. Includes SNI rotation and YouTube rewriting."
+---
+
+Domain fronting is a technique that exploits the gap between what a TLS handshake reveals and what the encrypted HTTP request contains. The TLS handshake carries the Server Name Indication (SNI) — visible to any network observer, including DPI filters — while the HTTP `Host` header travels inside the encrypted tunnel and is invisible to the network. MHR-CFW sets these two values to different hostnames so the network sees a connection to an allowed Google domain while the request is actually routed to the Apps Script relay.
+
+## How domain fronting works
+
+<Steps>
+  <Step title="TLS ClientHello with a safe SNI">
+    The local proxy opens a TCP connection to a Google edge IP (e.g. `216.239.38.120`) and begins a TLS handshake. The `ClientHello` message includes `SNI: www.google.com`. This field is unencrypted and fully visible to any network observer, firewall, or DPI system watching the connection.
+  </Step>
+  <Step title="Shared Google edge IP">
+    Google serves many of its properties from the same anycast IP ranges. The IP `216.239.38.120` and its peers respond to TLS for `www.google.com`, `script.google.com`, `mail.google.com`, and other Google-owned domains simultaneously. The DPI filter has no reason to block a TLS connection to what appears to be `www.google.com`.
+  </Step>
+  <Step title="Encrypted Host header points to script.google.com">
+    Once the TLS tunnel is established, the proxy sends an HTTP/1.1 request whose `Host` header is `script.google.com`. This header is inside the encrypted payload and invisible to the network. From the network's perspective, the session is just HTTPS traffic to `www.google.com`.
+  </Step>
+  <Step title="Google's load balancer routes by Host">
+    Google's edge infrastructure routes requests to the correct backend service based on the encrypted `Host` header, not the TLS SNI. The request is forwarded to the Apps Script deployment at `script.google.com`.
+  </Step>
+  <Step title="Apps Script fetches the target URL">
+    The Apps Script relay (`Code.gs`) receives the JSON payload, validates the shared `AUTH_KEY`, and calls your Cloudflare Worker via `UrlFetchApp.fetchAll()`. The Cloudflare Worker fetches the real destination URL and returns the response. That response travels back through Apps Script, through the encrypted TLS tunnel, and back to your browser.
+  </Step>
+</Steps>
+
+## SNI rotation
+
+Sending every request with `SNI: www.google.com` creates a recognisable traffic pattern: a single machine opens many TLS connections, all with identical SNIs. Some DPI systems detect this fingerprint and throttle or block it even when each individual connection looks legitimate.
+
+To break this fingerprint, `DomainFronter` rotates the SNI across a pool of Google-owned hostnames on every new outbound TLS connection. All hosts in the pool share the same Google edge IPs, so the routing behaviour and the `Host: script.google.com` relay path are identical regardless of which SNI is used.
+
+The default rotation pool is defined in `FRONT_SNI_POOL_GOOGLE` in `constants.py`:
+
+| SNI | Notes |
+|---|---|
+| `www.google.com` | Primary; always first in the pool |
+| `mail.google.com` | Benchmarked at full bandwidth on tested ISPs |
+| `accounts.google.com` | Included in active rotation |
+
+The pool is built at startup by `_build_sni_pool()` in `domain_fronter.py`. If you set `front_domains` in `config.json`, that list overrides the default pool entirely. The current SNI is selected via round-robin (`_next_sni()`) and advances with every call to `_open()`.
+
+## SNI rewriting
+
+Domain fronting and SNI rewriting are related but distinct techniques that serve different purposes.
+
+**Domain fronting** is used for the relay path: the proxy connects to `script.google.com` through a TLS tunnel whose SNI shows `www.google.com`. The actual HTTP traffic travels inside that tunnel to Apps Script.
+
+**SNI rewriting** is used for direct-connect paths: for Google-owned domains whose real SNI is DPI-blocked (such as YouTube), the proxy does not relay through Apps Script at all. Instead it:
+
+1. MITM-decrypts the browser's TLS session using the locally-signed certificate for the real hostname (e.g. `www.youtube.com`)
+2. Opens a new outbound TLS connection to `google_ip` with `SNI: front_domain` (e.g. `www.google.com`) instead of the blocked hostname
+3. Pipes application-layer bytes between the two TLS sessions
+
+The ISP sees `SNI: www.google.com` on the outbound connection. Google's edge routes the request to YouTube based on the encrypted `Host: www.youtube.com` header. This gives YouTube full bandwidth without consuming Apps Script relay quota.
+
+The following domain suffixes trigger SNI rewriting (defined in `SNI_REWRITE_SUFFIXES` in `constants.py`):
+
+| Suffix | Service |
+|---|---|
+| `youtube.com`, `youtu.be`, `youtube-nocookie.com` | YouTube |
+| `ytimg.com`, `ggpht.com` | YouTube CDN / thumbnails |
+| `gvt1.com`, `gvt2.com` | Google Video |
+| `doubleclick.net`, `googlesyndication.com` | Google Ads |
+| `googleadservices.com`, `google-analytics.com` | Google Analytics |
+| `googletagmanager.com`, `googletagservices.com` | Tag Manager |
+| `fonts.googleapis.com` | Google Fonts |
+| `script.google.com` | Apps Script itself |
+
+<Note>
+Setting `youtube_via_relay: true` in `config.json` switches YouTube (and `youtu.be`, `youtube-nocookie.com`) from SNI-rewrite mode to full relay mode through Apps Script. Use this if the Google frontend IP enforces SafeSearch on the SNI-rewrite path and you need unconstrained access.
+</Note>
+
+## Limitations
+
+- **Shared IP requirement.** Domain fronting only works when the front domain and the target domain are reachable at the same IP address. This is true for Google's anycast ranges but not for arbitrary CDNs. If Google changes its routing so that `www.google.com` and `script.google.com` are served from different IPs, fronting breaks.
+
+- **TLS 1.3 ESNI / ECH.** Encrypted Client Hello (ECH), the successor to ESNI, encrypts the SNI field in the `ClientHello`. If the server and client both support ECH, a network observer cannot read the SNI at all — which paradoxically removes the need for fronting but also removes the mechanism fronting relies on. Current deployments of MHR-CFW target servers that do not enforce ECH.
+
+- **IP-range blocking.** An ISP that detects fronting abuse on a given IP range can respond by blocking all traffic to that range rather than trying to distinguish good and bad connections. This is why the `google_ip` field exists: you can use the built-in IP scanner (`python main.py --scan`) to find a different Google edge IP that is not yet flagged.
